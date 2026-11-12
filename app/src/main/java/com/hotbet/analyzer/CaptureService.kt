@@ -59,7 +59,10 @@ class CaptureService : Service() {
     private var statsText: TextView? = null
 
     // Chronological: oldest -> newest. Updated only when overlapping OCR snapshots confirm new rows.
-    private val history = mutableListOf<Double>()
+    private val history = mutableListOf<Double>() 
+    private var forecasts: List<PredictionEngine.Forecast> = emptyList()
+    private var completedForecastRounds = 0
+    private var forecastActive = false
     // Visual order on the website: newest -> oldest.
     private var previousVisible: List<Double> = emptyList()
     private var statusMessage = "در انتظار خواندن تاریخچه ضرایب..."
