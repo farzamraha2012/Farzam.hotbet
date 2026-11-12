@@ -109,76 +109,114 @@ class CaptureService : Service() {
     }
 
     private fun showOverlay() {
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        windowManager = wm
-        val dp = resources.displayMetrics.density
-        fun toPx(x: Int) = (x * dp).toInt()
-        val white = Color.WHITE
-        val dimWhite = Color.rgb(206, 221, 233)
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(toPx(12), toPx(10), toPx(12), toPx(12))
-            background = GradientDrawable().apply {
-                setColor(Color.argb(242, 24, 32, 46))
-                cornerRadius = 18 * dp
-            }
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val title = TextView(this).apply {
-            text = "تحلیل‌گر ضرایب  •  نسخه ۰٫۵٫۰  •  جابه‌جایی"
-            textSize = 14f
-            setTextColor(white)
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.RIGHT
-        }
-        header.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val collapse = TextView(this).apply {
-            text = "  −  "
-            textSize = 24f
-            setTextColor(white)
-            setOnClickListener {
-                details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-                text = if (details.visibility == View.VISIBLE) "  −  " else "  +  "
-            }
-        }
-        header.addView(collapse)
-        header.addView(TextView(this).apply {
-            text = "  ×  "
-            textSize = 24f
-            setTextColor(white)
-            setOnClickListener { stopSelf() }
-        })
-        panel.addView(header)
+        
+val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+windowManager = wm
 
-        statusText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(dimWhite)
-            text = statusMessage
-            gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
-        }
-        statsText = TextView(this).apply {
-            textSize = 14f
-            setTextColor(white)
-            gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
-            setPadding(0, toPx(6), 0, toPx(6))
-        }
-        details.addView(statusText)
-        details.addView(statsText)
-        details.addView(TextView(this).apply {
-            text = "فقط ستون «انفجار» خوانده می‌شود؛ ضرایب زیر ۲ نیز ثبت می‌شوند. آمار با هر شروع از صفر است و ضریب دور بعد قابل پیش‌بینی قطعی نیست."
-            textSize = 11f
-            setTextColor(dimWhite)
-            gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
-        })
-        panel.addView(details)
+val dp = resources.displayMetrics.density
+fun toPx(x: Int) = (x * dp).toInt()
+
+val white = Color.WHITE
+val dimWhite = Color.rgb(190, 198, 211)
+val gold = Color.rgb(225, 183, 77)
+
+val panel = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+    setPadding(toPx(12), toPx(12), toPx(12), toPx(12))
+    background = GradientDrawable(
+        GradientDrawable.Orientation.TL_BR,
+        intArrayOf(Color.rgb(29, 35, 47), Color.rgb(12, 16, 25))
+    ).apply {
+        cornerRadius = 18 * dp
+        setStroke(toPx(1), Color.rgb(115, 87, 39))
+    }
+    layoutDirection = View.LAYOUT_DIRECTION_RTL
+}
+
+val header = LinearLayout(this).apply {
+    orientation = LinearLayout.HORIZONTAL
+    gravity = Gravity.CENTER_VERTICAL
+}
+
+val title = TextView(this).apply {
+    text = "HOTBET  •  پنج دور آینده"
+    textSize = 15f
+    setTextColor(gold)
+    setTypeface(null, Typeface.BOLD)
+    gravity = Gravity.RIGHT
+}
+
+header.addView(
+    title,
+    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+)
+
+val collapse = TextView(this).apply {
+    text = "−"
+    textSize = 24f
+    setTextColor(white)
+}
+
+val details = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+}
+
+collapse.setOnClickListener {
+    details.visibility =
+        if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    collapse.text = if (details.visibility == View.VISIBLE) "−" else "+"
+}
+
+header.addView(collapse)
+
+val close = TextView(this).apply {
+    text = "×"
+    textSize = 25f
+    setTextColor(white)
+    setPadding(toPx(8), 0, toPx(4), 0)
+    setOnClickListener { stopSelf() }
+}
+
+header.addView(close)
+panel.addView(header)
+
+statusText = TextView(this).apply {
+    textSize = 11f
+    setTextColor(dimWhite)
+    gravity = Gravity.RIGHT
+    textDirection = View.TEXT_DIRECTION_RTL
+    setPadding(0, toPx(8), 0, toPx(10))
+}
+
+details.addView(statusText)
+
+statsText = TextView(this).apply {
+    textSize = 14f
+    setTextColor(white)
+    setTypeface(null, Typeface.BOLD)
+    gravity = Gravity.RIGHT
+    textDirection = View.TEXT_DIRECTION_RTL
+    setLineSpacing(toPx(5).toFloat(), 1.0f)
+    setPadding(toPx(10), toPx(12), toPx(10), toPx(12))
+    background = GradientDrawable().apply {
+        setColor(Color.rgb(39, 46, 59))
+        cornerRadius = 12 * dp
+    }
+}
+
+details.addView(statsText)
+
+details.addView(TextView(this).apply {
+    text = "این محدوده‌ها برآورد آماری هستند، نه پیش‌بینی قطعی نتیجه دور بعد."
+    textSize = 10f
+    setTextColor(dimWhite)
+    gravity = Gravity.RIGHT
+    textDirection = View.TEXT_DIRECTION_RTL
+    setPadding(0, toPx(10), 0, toPx(4))
+})
+
+panel.addView(details)
+
 
         val displayWidth = resources.displayMetrics.widthPixels
         // Keep the floating panel on the right so it does not cover the multiplier history column.
