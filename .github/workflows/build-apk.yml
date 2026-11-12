@@ -47,6 +47,10 @@ jobs:
         working-directory: source-v08
         run: gradle wrapper --gradle-version 8.9 --distribution-type bin
 
+      - name: Fix Kotlin background type mismatch
+        run: |
+          sed -i 's/setBackgroundColor(background)/setBackgroundColor(this@AssistantActivity.background)/g' source-v08/app/src/main/java/com/hotbet/analyzer/AssistantActivity.kt
+
       - name: Build version 0.8 APK
         working-directory: source-v08
         run: bash ./gradlew --no-daemon assembleDebug
