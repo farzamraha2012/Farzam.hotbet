@@ -29,10 +29,12 @@ jobs:
         run: gradle wrapper --gradle-version 8.9 --distribution-type bin
       - name: Build debug APK
         run: bash ./gradlew --no-daemon assembleDebug
+      - name: Rename APK with version
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/HotBetAnalyzer-v0.5.0-S23Ultra-debug.apk
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-S23Ultra-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: HotBetAnalyzer-v0.5.0-S23Ultra-debug-apk
+          path: app/build/outputs/apk/debug/HotBetAnalyzer-v0.5.0-S23Ultra-debug.apk
           if-no-files-found: error
           retention-days: 14
