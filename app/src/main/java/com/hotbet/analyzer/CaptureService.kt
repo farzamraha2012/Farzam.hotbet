@@ -450,10 +450,18 @@ class CaptureService : Service() {
 
         noOverlapCount = 0
         val newCount = overlap.visibleIndex
-        if (newCount > 0) {
-            history.addAll(visible.take(newCount).asReversed())
-            while (history.size > MAX_SAVED) history.removeAt(0)
-        }
+        
+if (newCount > 0) {
+    history.addAll(visible.take(newCount).asReversed())
+    while (history.size > MAX_SAVED) history.removeAt(0)
+
+    if (!forecastActive && history.size >= 10) {
+        forecasts = PredictionEngine.forecast(history.toList())
+        completedForecastRounds = 0
+        forecastActive = forecasts.size == 5
+    }
+}
+
         previousVisible = visible.toList()
         statusMessage = if (newCount > 0) {
             "${visible.size} ضریب قابل مشاهده؛ $newCount ضریب جدید ثبت شد."
@@ -464,26 +472,19 @@ class CaptureService : Service() {
     }
 
     private fun render() {
-        val recent = history.takeLast(MAX_SAVED)
-        val count = recent.size
-        val ordered = recent.sorted()
-        val median = if (count == 0) 0.0 else if (count % 2 == 1) ordered[count / 2]
-            else (ordered[count / 2 - 1] + ordered[count / 2]) / 2.0
-        val above2 = recent.count { it >= 2.0 }
-        val above3 = recent.count { it >= 3.0 }
-        fun fmt(value: Double) = String.format(Locale.US, "%.2f", value)
-        val recentText = recent.asReversed().take(6).joinToString("  •  ") { "${fmt(it)}×" }
-        val text = if (count == 0) "هنوز ضریبی ثبت نشده است." else
-            "تعداد ثبت‌شده: $count\n" +
-            "آخرین ضریب ثبت‌شده: ${fmt(recent.last())}×\n" +
-            "میانه ضرایب: ${fmt(median)}×\n" +
-            "در نمونه گذشته، ۲× یا بیشتر: $above2 از $count\n" +
-            "در نمونه گذشته، ۳× یا بیشتر: $above3 از $count\n" +
-            "۶ ضریب اخیر: $recentText"
-        ui.post {
-            statusText?.text = statusMessage
-            statsText?.text = text
-        }
+    val forecastText = if (forecasts.isEmpty()) {
+        "در حال جمع‌آوری داده برای تحلیل..."
+    } else {
+        forecasts.take(5).mapIndexed { index, forecast ->
+            val mark = if (index < completedForecastRounds) "✓" else "○"
+            "$mark دور ${forecast.round}: ${forecast.range}"
+        }.joinToString("\n")
+    }
+
+    ui.post {
+        statusText?.text = statusMessage
+        statsText?.text = forecastText
+    }
     }
 
     private fun createChannel() {
