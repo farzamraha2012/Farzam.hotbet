@@ -39,6 +39,7 @@ class CaptureService : Service() {
         private const val CHANNEL = "screen_reader"
         private const val MAX_SAVED = 300
         private const val MAX_VISIBLE_ROWS = 35
+        private const val MAX_NEW_PER_SCAN = 12
     }
 
     private var projection: MediaProjection? = null
@@ -75,8 +76,8 @@ class CaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action != ACTION_START) return START_NOT_STICKY
         val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("تحلیل‌گر هات‌بت فعال است")
-            .setContentText("خواندن تاریخچه ضرایب روی صفحه؛ برای توقف وارد برنامه شوید")
+            .setContentTitle("تحلیل‌گر هات‌بت • نسخه ۰٫۵٫۰ فعال است")
+            .setContentText("خواندن ستون تاریخچه ضرایب؛ برای توقف وارد برنامه شوید")
             .setSmallIcon(R.drawable.ic_stat_capture)
             .setOngoing(true).build()
         if (Build.VERSION.SDK_INT >= 29) {
@@ -125,7 +126,7 @@ class CaptureService : Service() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val title = TextView(this).apply {
-            text = "تحلیل‌گر ضرایب  •  جابه‌جایی"
+            text = "تحلیل‌گر ضرایب  •  نسخه ۰٫۵٫۰  •  جابه‌جایی"
             textSize = 14f
             setTextColor(white)
             setTypeface(null, Typeface.BOLD)
@@ -168,7 +169,7 @@ class CaptureService : Service() {
         details.addView(statusText)
         details.addView(statsText)
         details.addView(TextView(this).apply {
-            text = "آمار فقط مربوط به همین جلسه است؛ با شروع دوباره از صفر آغاز می‌شود. ضریب دور بعد قابل پیش‌بینی قطعی نیست."
+            text = "فقط ستون «انفجار» خوانده می‌شود؛ ضرایب زیر ۲ نیز ثبت می‌شوند. آمار با هر شروع از صفر است و ضریب دور بعد قابل پیش‌بینی قطعی نیست."
             textSize = 11f
             setTextColor(dimWhite)
             gravity = Gravity.RIGHT
@@ -227,11 +228,11 @@ class CaptureService : Service() {
         val dm = resources.displayMetrics
         worker = HandlerThread("ocr-worker").also { it.start() }
         handler = Handler(worker!!.looper)
-        reader = ImageReader.newInstance(dm.widthPixels, dm.heightPixels, PixelFormat.RGBA_8888, 2)
+        reader = ImageReader.newInstance(dm.widthPixels, dm.heightPixels, PixelFormat.RGBA_8888, 3)
         reader!!.setOnImageAvailableListener({ r ->
             val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             val now = System.currentTimeMillis()
-            if (now - lastAt < 800L || !processing.compareAndSet(false, true)) {
+            if (now - lastAt < 600L || !processing.compareAndSet(false, true)) {
                 image.close(); return@setOnImageAvailableListener
             }
             lastAt = now
@@ -247,6 +248,7 @@ class CaptureService : Service() {
         val generation = sessionGeneration
         var fullBitmap: Bitmap? = null
         var cropBitmap: Bitmap? = null
+        var ocrBitmap: Bitmap? = null
         try {
             val plane = image.planes[0]
             val paddedWidth = plane.rowStride / plane.pixelStride
@@ -256,30 +258,38 @@ class CaptureService : Service() {
             padded.recycle()
             image.close()
 
-            // The supplied HotBet mobile layout places the multiplier column on the left,
-            // below the graph. OCR only this region to reduce work and avoid unrelated numbers.
+            // The supplied HotBet mobile layout places the "انفجار" values in a
+            // narrow left-hand column in the lower part of the page. The old 7%-34%,
+            // 35%-bottom crop also included the bet multiplier input (usually 2.00)
+            // and graph labels. That caused false 2.00 readings. Keep OCR inside the
+            // history value column only, below the bet form and graph.
             val source = fullBitmap ?: throw IllegalStateException("صفحه قابل خواندن نیست")
-            val left = (source.width * 0.07f).toInt().coerceIn(0, source.width - 1)
-            val right = (source.width * 0.34f).toInt().coerceIn(left + 1, source.width)
-            val top = (source.height * 0.35f).toInt().coerceIn(0, source.height - 1)
-            val cropped = Bitmap.createBitmap(source, left, top, right - left, source.height - top)
+            val left = (source.width * 0.10f).toInt().coerceIn(0, source.width - 1)
+            val right = (source.width * 0.235f).toInt().coerceIn(left + 1, source.width)
+            val top = (source.height * 0.64f).toInt().coerceIn(0, source.height - 1)
+            val bottom = (source.height * 0.995f).toInt().coerceIn(top + 1, source.height)
+            val cropped = Bitmap.createBitmap(source, left, top, right - left, bottom - top)
             cropBitmap = cropped
             source.recycle()
             fullBitmap = null
+            val prepared = prepareForOcr(cropped)
+            ocrBitmap = prepared
 
-            recognizer.process(InputImage.fromBitmap(cropped, 0))
+            recognizer.process(InputImage.fromBitmap(prepared, 0))
                 .addOnSuccessListener { result ->
                     if (generation != sessionGeneration) return@addOnSuccessListener
-                    // The crop is already restricted to the history multiplier column.
-                    val visible = result.textBlocks.flatMap { it.lines }.mapNotNull { line ->
+                    // One OCR line should correspond to one multiplier row. Parse the
+                    // first decimal value on each line, retain values below 2.00, and
+                    // preserve the site's newest-to-oldest visual order.
+                    val rows = result.textBlocks.flatMap { it.lines }.mapNotNull { line ->
                         val box = line.boundingBox ?: return@mapNotNull null
                         val matcher = number.matcher(line.text)
                         if (!matcher.find()) return@mapNotNull null
                         val value = matcher.group(1)?.replace(',', '.')?.toDoubleOrNull()
                         if (value == null || value !in 1.0..1000.0) null
                         else box.top to value
-                    }.sortedBy { it.first }.take(MAX_VISIBLE_ROWS).map { it.second }
-                    observe(visible)
+                    }.sortedBy { it.first }.take(MAX_VISIBLE_ROWS)
+                    observe(rows.map { it.second })
                 }
                 .addOnFailureListener {
                     if (generation == sessionGeneration) {
@@ -288,15 +298,41 @@ class CaptureService : Service() {
                     }
                 }
                 .addOnCompleteListener {
+                    try { prepared.recycle() } catch (_: Exception) {}
                     try { cropped.recycle() } catch (_: Exception) {}
                     if (generation == sessionGeneration) processing.set(false)
                 }
         } catch (_: Exception) {
             try { image.close() } catch (_: Exception) {}
             try { fullBitmap?.recycle() } catch (_: Exception) {}
+            try { ocrBitmap?.recycle() } catch (_: Exception) {}
             try { cropBitmap?.recycle() } catch (_: Exception) {}
             if (generation == sessionGeneration) processing.set(false)
         }
+    }
+
+
+    /** Upscale and normalize the colored multiplier text before ML Kit OCR. */
+    private fun prepareForOcr(source: Bitmap): Bitmap {
+        val scaled = Bitmap.createScaledBitmap(source, source.width * 3, source.height * 3, true)
+        val width = scaled.width
+        val height = scaled.height
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        for (i in pixels.indices) {
+            val color = pixels[i]
+            val red = Color.red(color)
+            val green = Color.green(color)
+            val blue = Color.blue(color)
+            val gray = (red * 299 + green * 587 + blue * 114) / 1000
+            val contrast = (((gray - 128) * 1.6f) + 128f).toInt().coerceIn(0, 255)
+            val value = if (contrast < 215) 0 else 255
+            pixels[i] = Color.rgb(value, value, value)
+        }
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        output.setPixels(pixels, 0, width, 0, 0, width, height)
+        scaled.recycle()
+        return output
     }
 
     private fun resetSession() {
@@ -306,7 +342,7 @@ class CaptureService : Service() {
         noOverlapCount = 0
         lastAt = 0L
         processing.set(false)
-        // Remove data saved by v0.3; v0.4.1 keeps only results observed after this session starts.
+        // Clear any legacy persisted capture data; this version keeps session results in memory only.
         getSharedPreferences("captured_history", MODE_PRIVATE).edit().clear().apply()
         statusMessage = "جلسه جدید؛ در انتظار خواندن تاریخچه ضرایب..."
     }
@@ -336,19 +372,33 @@ class CaptureService : Service() {
         val length: Int
     )
 
-    private fun findOverlap(previous: List<Double>, current: List<Double>): OverlapMatch? {
+    /**
+     * History is displayed newest-first. New rounds therefore appear only at the
+     * head of the current list; the remainder must match the previous list from
+     * its first item. Searching arbitrary interior overlaps can mistake repeated
+     * multipliers (especially 2.00) for a new result.
+     */
+    private fun findHeadOverlap(previous: List<Double>, current: List<Double>): OverlapMatch? {
+        if (previous.isEmpty() || current.isEmpty()) return null
+        if (current == previous) return OverlapMatch(0, 0, minOf(previous.size, current.size))
+
+        val maxNew = minOf(MAX_NEW_PER_SCAN, current.size - 1)
         var best: OverlapMatch? = null
-        for (previousIndex in previous.indices) {
-            for (visibleIndex in current.indices) {
-                var length = 0
-                while (previousIndex + length < previous.size &&
-                    visibleIndex + length < current.size &&
-                    previous[previousIndex + length] == current[visibleIndex + length]) {
-                    length++
-                }
-                if (length >= 2 && (best == null || length > best.length ||
-                    (length == best.length && visibleIndex < best.visibleIndex))) {
-                    best = OverlapMatch(previousIndex, visibleIndex, length)
+        for (newCount in 0..maxNew) {
+            val available = current.size - newCount
+            val limit = minOf(previous.size, available)
+            var length = 0
+            while (length < limit && previous[length] == current[newCount + length]) {
+                length++
+            }
+            val required = minOf(3, minOf(previous.size, available))
+            if (length >= required) {
+                val candidate = OverlapMatch(0, newCount, length)
+                val oldBest = best
+                if (oldBest == null || candidate.length > oldBest.length ||
+                    (candidate.length == oldBest.length && candidate.visibleIndex > 0 && oldBest.visibleIndex == 0) ||
+                    (candidate.length == oldBest.length && candidate.visibleIndex > 0 && oldBest.visibleIndex > 0 && candidate.visibleIndex < oldBest.visibleIndex)) {
+                    best = candidate
                 }
             }
         }
@@ -357,7 +407,7 @@ class CaptureService : Service() {
 
     private fun observe(visible: List<Double>) {
         if (visible.isEmpty()) {
-            statusMessage = "تاریخچه پیدا نشد؛ ستون ضرایب را کامل و بدون پوشش روی صفحه نگه دارید."
+            statusMessage = "ستون «انفجار» پیدا نشد؛ تاریخچه را در پایین صفحه و بدون پوشش نگه دارید."
             render()
             return
         }
@@ -367,21 +417,22 @@ class CaptureService : Service() {
             // Use them only as an OCR baseline; count only rounds appearing after this point.
             previousVisible = visible.toList()
             noOverlapCount = 0
-            statusMessage = "${visible.size} ضریب موجود فقط به‌عنوان مبنا شناسایی شد؛ آمار جلسه از دور بعد ثبت می‌شود."
+            statusMessage = "${visible.size} ضریب ستون تاریخچه به‌عنوان مبنا شناسایی شد؛ آمار از دور بعد ثبت می‌شود."
             render()
             return
         }
 
         if (visible == previousVisible) {
-            statusMessage = "${visible.size} ضریب روی صفحه دیده شد؛ مورد جدیدی ثبت نشد."
+            statusMessage = "${visible.size} ردیف در ستون تاریخچه دیده شد؛ مورد جدیدی ثبت نشد."
             render()
             return
         }
 
-        val overlap = findOverlap(previousVisible, visible)
-        // A large jump usually means the user scrolled or the page layout changed.
-        // Do not count it as new rounds; re-anchor after several consistent scans.
-        if (overlap == null || overlap.visibleIndex > 6) {
+        val overlap = findHeadOverlap(previousVisible, visible)
+        // If the list no longer shares a reliable prefix, the user may have scrolled
+        // or the site layout may have changed. Re-anchor after repeated scans rather
+        // than injecting unrelated page numbers into the session statistics.
+        if (overlap == null || overlap.visibleIndex > MAX_NEW_PER_SCAN) {
             noOverlapCount++
             if (noOverlapCount >= 3) {
                 previousVisible = visible.toList()

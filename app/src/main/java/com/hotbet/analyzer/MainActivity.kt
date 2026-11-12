@@ -17,7 +17,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(30, 48, 30, 30) }
-        layout.addView(TextView(this).apply { text = "تحلیل‌گر هات‌بت"; textSize = 26f })
+        layout.addView(TextView(this).apply { text = "تحلیل‌گر هات‌بت • نسخه ۰٫۵٫۰"; textSize = 26f })
         status = TextView(this).apply { text = "برای شروع، مجوز پنجره شناور و ضبط صفحه لازم است."; textSize = 16f }
         layout.addView(status)
         layout.addView(Button(this).apply {
@@ -48,7 +48,7 @@ class MainActivity : Activity() {
             }
         })
         layout.addView(TextView(this).apply {
-            text = "پنجره شناور در سمت راست قرار می‌گیرد تا ستون ضرایب را نپوشاند. با هر بار شروع خواندن، آمار جلسه از صفر آغاز می‌شود. ستون تاریخچه ضرایب را در سمت چپ صفحه و بدون پوشش نگه دارید. ثبت ضریب جدید با تطبیق ردیف‌های مشترک انجام می‌شود؛ این برنامه ضریب دور بعد را پیش‌بینی نمی‌کند."
+            text = "نسخه ۰٫۵٫۰: خواندن فقط ستون «انفجار» در پایینِ سمت چپ صفحه؛ اعداد فرم شرط و نمودار نادیده گرفته می‌شوند. ضرایب کمتر از ۲ نیز ثبت می‌شوند. با هر بار شروع، آمار جلسه از صفر آغاز می‌شود. پنجره شناور را در سمت راست نگه دارید و ستون تاریخچه را کامل و بدون پوشش نمایش دهید. این برنامه ضریب دور بعد را پیش‌بینی نمی‌کند."
             textSize = 14f
         })
         setContentView(ScrollView(this).apply { addView(layout) })
