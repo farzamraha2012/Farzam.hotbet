@@ -26,6 +26,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.Locale
 import java.util.regex.Pattern
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Reads visible game history locally through OCR. It does not access any game API
@@ -47,8 +48,10 @@ class CaptureService : Service() {
     private var handler: Handler? = null
     private val ui = Handler(Looper.getMainLooper())
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    private var lastAt = 0L
-    private var busy = false
+    @Volatile private var lastAt = 0L
+    private val processing = AtomicBoolean(false)
+    @Volatile private var sessionGeneration = 0
+    private var noOverlapCount = 0
     private var overlay: View? = null
     private var windowManager: WindowManager? = null
     private var statusText: TextView? = null
@@ -67,7 +70,6 @@ class CaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        loadHistory()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -91,7 +93,10 @@ class CaptureService : Service() {
         if (code != Activity.RESULT_OK || data == null) {
             stopSelf(); return START_NOT_STICKY
         }
-        if (projection != null) return START_NOT_STICKY
+        // If the user starts again while an old capture service is still alive,
+        // tear it down first so the new run always gets a clean session.
+        if (projection != null || overlay != null) stopCaptureResources()
+        resetSession()
         try {
             showOverlay()
             begin(code, data)
@@ -163,7 +168,7 @@ class CaptureService : Service() {
         details.addView(statusText)
         details.addView(statsText)
         details.addView(TextView(this).apply {
-            text = "آمار گذشته است؛ ضریب دور بعد قابل پیش‌بینی قطعی نیست."
+            text = "آمار فقط مربوط به همین جلسه است؛ با شروع دوباره از صفر آغاز می‌شود. ضریب دور بعد قابل پیش‌بینی قطعی نیست."
             textSize = 11f
             setTextColor(dimWhite)
             gravity = Gravity.RIGHT
@@ -172,7 +177,8 @@ class CaptureService : Service() {
         panel.addView(details)
 
         val displayWidth = resources.displayMetrics.widthPixels
-        val panelWidth = minOf(toPx(325), displayWidth - toPx(24))
+        // Keep the floating panel on the right so it does not cover the multiplier history column.
+        val panelWidth = minOf(toPx(280), displayWidth - toPx(24))
         val params = WindowManager.LayoutParams(
             panelWidth, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -180,8 +186,8 @@ class CaptureService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = toPx(12)
-            y = toPx(90)
+            x = (displayWidth - panelWidth - toPx(12)).coerceAtLeast(0)
+            y = toPx(70)
         }
         header.setOnTouchListener(object : View.OnTouchListener {
             private var startX = 0
@@ -225,9 +231,10 @@ class CaptureService : Service() {
         reader!!.setOnImageAvailableListener({ r ->
             val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             val now = System.currentTimeMillis()
-            if (busy || now - lastAt < 1500L) { image.close(); return@setOnImageAvailableListener }
+            if (now - lastAt < 800L || !processing.compareAndSet(false, true)) {
+                image.close(); return@setOnImageAvailableListener
+            }
             lastAt = now
-            busy = true
             recognize(image)
         }, handler)
         display = mp.createVirtualDisplay(
@@ -237,102 +244,169 @@ class CaptureService : Service() {
     }
 
     private fun recognize(image: Image) {
-        var bitmap: Bitmap? = null
+        val generation = sessionGeneration
+        var fullBitmap: Bitmap? = null
+        var cropBitmap: Bitmap? = null
         try {
             val plane = image.planes[0]
             val paddedWidth = plane.rowStride / plane.pixelStride
             val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
             padded.copyPixelsFromBuffer(plane.buffer)
-            bitmap = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
+            fullBitmap = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
             padded.recycle()
             image.close()
-            val captured = bitmap
-            recognizer.process(InputImage.fromBitmap(captured, 0))
+
+            // The supplied HotBet mobile layout places the multiplier column on the left,
+            // below the graph. OCR only this region to reduce work and avoid unrelated numbers.
+            val source = fullBitmap ?: throw IllegalStateException("صفحه قابل خواندن نیست")
+            val left = (source.width * 0.07f).toInt().coerceIn(0, source.width - 1)
+            val right = (source.width * 0.34f).toInt().coerceIn(left + 1, source.width)
+            val top = (source.height * 0.35f).toInt().coerceIn(0, source.height - 1)
+            val cropped = Bitmap.createBitmap(source, left, top, right - left, source.height - top)
+            cropBitmap = cropped
+            source.recycle()
+            fullBitmap = null
+
+            recognizer.process(InputImage.fromBitmap(cropped, 0))
                 .addOnSuccessListener { result ->
-                    val width = captured.width
-                    val height = captured.height
-                    // Only the lower-left history column in portrait mode. Prevent mixing
-                    // account balances, auto cashout settings, and the live game multiplier.
+                    if (generation != sessionGeneration) return@addOnSuccessListener
+                    // The crop is already restricted to the history multiplier column.
                     val visible = result.textBlocks.flatMap { it.lines }.mapNotNull { line ->
                         val box = line.boundingBox ?: return@mapNotNull null
-                        if (box.centerX() > width * 0.43f || box.top < height * 0.59f) return@mapNotNull null
-                        val m = number.matcher(line.text)
-                        if (!m.find()) return@mapNotNull null
-                        val value = m.group(1)?.replace(',', '.')?.toDoubleOrNull()
+                        val matcher = number.matcher(line.text)
+                        if (!matcher.find()) return@mapNotNull null
+                        val value = matcher.group(1)?.replace(',', '.')?.toDoubleOrNull()
                         if (value == null || value !in 1.0..1000.0) null
                         else box.top to value
                     }.sortedBy { it.first }.take(MAX_VISIBLE_ROWS).map { it.second }
                     observe(visible)
                 }
-                .addOnFailureListener { statusMessage = "خطا در تشخیص متن صفحه"; render() }
-                .addOnCompleteListener { captured.recycle(); busy = false }
+                .addOnFailureListener {
+                    if (generation == sessionGeneration) {
+                        statusMessage = "خطا در تشخیص متن صفحه؛ صفحه تاریخچه را واضح نگه دارید."
+                        render()
+                    }
+                }
+                .addOnCompleteListener {
+                    try { cropped.recycle() } catch (_: Exception) {}
+                    if (generation == sessionGeneration) processing.set(false)
+                }
         } catch (_: Exception) {
             try { image.close() } catch (_: Exception) {}
-            bitmap?.recycle()
-            busy = false
+            try { fullBitmap?.recycle() } catch (_: Exception) {}
+            try { cropBitmap?.recycle() } catch (_: Exception) {}
+            if (generation == sessionGeneration) processing.set(false)
         }
+    }
+
+    private fun resetSession() {
+        sessionGeneration++
+        history.clear()
+        previousVisible = emptyList()
+        noOverlapCount = 0
+        lastAt = 0L
+        processing.set(false)
+        // Remove data saved by v0.3; v0.4.1 keeps only results observed after this session starts.
+        getSharedPreferences("captured_history", MODE_PRIVATE).edit().clear().apply()
+        statusMessage = "جلسه جدید؛ در انتظار خواندن تاریخچه ضرایب..."
+    }
+
+    private fun stopCaptureResources() {
+        reader?.setOnImageAvailableListener(null, null)
+        try { display?.release() } catch (_: Exception) {}
+        display = null
+        try { reader?.close() } catch (_: Exception) {}
+        reader = null
+        try { projection?.unregisterCallback(projectionCallback) } catch (_: Exception) {}
+        try { projection?.stop() } catch (_: Exception) {}
+        projection = null
+        worker?.quitSafely()
+        worker = null
+        handler = null
+        try { overlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        overlay = null
+        statusText = null
+        statsText = null
+        processing.set(false)
+    }
+
+    private data class OverlapMatch(
+        val previousIndex: Int,
+        val visibleIndex: Int,
+        val length: Int
+    )
+
+    private fun findOverlap(previous: List<Double>, current: List<Double>): OverlapMatch? {
+        var best: OverlapMatch? = null
+        for (previousIndex in previous.indices) {
+            for (visibleIndex in current.indices) {
+                var length = 0
+                while (previousIndex + length < previous.size &&
+                    visibleIndex + length < current.size &&
+                    previous[previousIndex + length] == current[visibleIndex + length]) {
+                    length++
+                }
+                if (length >= 2 && (best == null || length > best.length ||
+                    (length == best.length && visibleIndex < best.visibleIndex))) {
+                    best = OverlapMatch(previousIndex, visibleIndex, length)
+                }
+            }
+        }
+        return best
     }
 
     private fun observe(visible: List<Double>) {
         if (visible.isEmpty()) {
-            statusMessage = "تاریخچه پیدا نشد؛ فهرست ضرایب را روی صفحه نگه دارید."
+            statusMessage = "تاریخچه پیدا نشد؛ ستون ضرایب را کامل و بدون پوشش روی صفحه نگه دارید."
             render()
             return
         }
+
+        if (previousVisible.isEmpty()) {
+            // The website already shows results from before the user started this session.
+            // Use them only as an OCR baseline; count only rounds appearing after this point.
+            previousVisible = visible.toList()
+            noOverlapCount = 0
+            statusMessage = "${visible.size} ضریب موجود فقط به‌عنوان مبنا شناسایی شد؛ آمار جلسه از دور بعد ثبت می‌شود."
+            render()
+            return
+        }
+
         if (visible == previousVisible) {
             statusMessage = "${visible.size} ضریب روی صفحه دیده شد؛ مورد جدیدی ثبت نشد."
             render()
             return
         }
-        if (history.isEmpty()) {
-            history.addAll(visible.asReversed())
-            previousVisible = visible
-            statusMessage = "${visible.size} ضریب اولیه ثبت شد."
-            persistHistory()
+
+        val overlap = findOverlap(previousVisible, visible)
+        // A large jump usually means the user scrolled or the page layout changed.
+        // Do not count it as new rounds; re-anchor after several consistent scans.
+        if (overlap == null || overlap.visibleIndex > 6) {
+            noOverlapCount++
+            if (noOverlapCount >= 3) {
+                previousVisible = visible.toList()
+                noOverlapCount = 0
+                statusMessage = "چیدمان تاریخچه تغییر کرد؛ مبنا تازه شد، داده جدیدی ثبت نشد."
+            } else {
+                statusMessage = "${visible.size} ضریب دیده شد؛ در انتظار تطبیق ردیف‌های مشترک برای ثبت دقیق..."
+            }
             render()
             return
         }
 
-        // Match at least two successive visible results to avoid duplicate recording
-        // when OCR occasionally misses a row or the user scrolls the page.
-        var newCount: Int? = null
-        if (previousVisible.isNotEmpty()) {
-            for (shift in 0..minOf(6, visible.size)) {
-                val n = minOf(4, previousVisible.size, visible.size - shift)
-                if (n >= 2 && (0 until n).all { visible[shift + it] == previousVisible[it] }) {
-                    newCount = shift
-                    break
-                }
-            }
+        noOverlapCount = 0
+        val newCount = overlap.visibleIndex
+        if (newCount > 0) {
+            history.addAll(visible.take(newCount).asReversed())
+            while (history.size > MAX_SAVED) history.removeAt(0)
         }
-        if (newCount == null) {
-            statusMessage = "${visible.size} ضریب دیده شد؛ تغییرات برای ثبت دقیق تأیید نشد."
+        previousVisible = visible.toList()
+        statusMessage = if (newCount > 0) {
+            "${visible.size} ضریب قابل مشاهده؛ $newCount ضریب جدید ثبت شد."
         } else {
-            if (newCount > 0) {
-                history.addAll(visible.take(newCount).asReversed())
-                while (history.size > MAX_SAVED) history.removeAt(0)
-            }
-            previousVisible = visible
-            persistHistory()
-            statusMessage = "${visible.size} ضریب قابل مشاهده؛ ${newCount} ضریب جدید ثبت شد."
+            "تاریخچه به‌روزرسانی شد؛ ضریب جدیدی در ابتدای فهرست نبود."
         }
         render()
-    }
-
-    private fun loadHistory() {
-        val prefs = getSharedPreferences("captured_history", MODE_PRIVATE)
-        history.clear()
-        history.addAll(prefs.getString("history", "").orEmpty().split('|')
-            .mapNotNull { it.toDoubleOrNull() }.takeLast(MAX_SAVED))
-        previousVisible = prefs.getString("visible", "").orEmpty().split('|')
-            .mapNotNull { it.toDoubleOrNull() }
-    }
-
-    private fun persistHistory() {
-        getSharedPreferences("captured_history", MODE_PRIVATE).edit()
-            .putString("history", history.joinToString("|"))
-            .putString("visible", previousVisible.joinToString("|"))
-            .apply()
     }
 
     private fun render() {
@@ -364,14 +438,8 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
-        reader?.setOnImageAvailableListener(null, null)
-        display?.release()
-        reader?.close()
-        try { projection?.unregisterCallback(projectionCallback) } catch (_: Exception) {}
-        projection?.stop()
-        worker?.quitSafely()
-        try { overlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
-        overlay = null
+        sessionGeneration++
+        stopCaptureResources()
         recognizer.close()
         super.onDestroy()
     }
