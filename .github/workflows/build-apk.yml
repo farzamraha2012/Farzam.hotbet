@@ -1,40 +1,64 @@
+
 name: Build Android APK
+
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - v0.8-test
+
 permissions:
   contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up JDK 17
+
+      - name: Extract version 0.8 source
+        run: |
+          mkdir -p source-v08
+          unzip -q "HotBetAnalyzer-v0.8.0-hybrid-assistant-source.zip" -d source-v08
+          test -f source-v08/settings.gradle.kts
+          test -f source-v08/app/build.gradle.kts
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-      - name: Install Android SDK platform
+
+      - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Generate genuine Gradle wrapper
+
+      - name: Generate Gradle wrapper
+        working-directory: source-v08
         run: gradle wrapper --gradle-version 8.9 --distribution-type bin
-      - name: Build debug APK
+
+      - name: Build version 0.8 APK
+        working-directory: source-v08
         run: bash ./gradlew --no-daemon assembleDebug
-      - name: Rename APK with version
-        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/HotBetAnalyzer-v0.5.0-S23Ultra-debug.apk
-      - name: Upload installable debug APK
+
+      - name: Rename APK
+        run: |
+          cp source-v08/app/build/outputs/apk/debug/app-debug.apk HotBetAnalyzer-v0.8.0-S23Ultra-debug.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-v0.5.0-S23Ultra-debug-apk
-          path: app/build/outputs/apk/debug/HotBetAnalyzer-v0.5.0-S23Ultra-debug.apk
+          name: HotBetAnalyzer-v0.8.0-S23Ultra-debug-apk
+          path: HotBetAnalyzer-v0.8.0-S23Ultra-debug.apk
           if-no-files-found: error
           retention-days: 14
