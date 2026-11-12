@@ -1,11 +1,10 @@
 
-name: Build Android APK
+name: Build HotBetAnalyzer v0.9 APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - v0.8-test
+    branches: [main, master, v0.8-test, v0.9-test]
 
 permissions:
   contents: read
@@ -14,19 +13,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 35
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract version 0.8 source
+      - name: Extract v0.9 source ZIP
         run: |
-          mkdir -p source-v08
-          unzip -q "HotBetAnalyzer-v0.8.0-hybrid-assistant-source.zip" -d source-v08
-          test -f source-v08/settings.gradle.kts
-          test -f source-v08/app/build.gradle.kts
+          mkdir -p source-v09
+          unzip -q HotBetAnalyzer-v0.9.0-analytics-source.zip -d source-v09
+          test -f source-v09/settings.gradle.kts
+          test -f source-v09/app/build.gradle.kts
+          test -f source-v09/app/src/main/java/com/hotbet/analyzer/AnalyticsEngine.kt
 
-      - name: Set up Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -35,7 +34,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK
+      - name: Install Android SDK platform
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
       - name: Set up Gradle 8.9
@@ -44,25 +43,22 @@ jobs:
           gradle-version: '8.9'
 
       - name: Generate Gradle wrapper
-        working-directory: source-v08
+        working-directory: source-v09
         run: gradle wrapper --gradle-version 8.9 --distribution-type bin
 
-      - name: Fix Kotlin background type mismatch
-        run: |
-          sed -i 's/setBackgroundColor(background)/setBackgroundColor(this@AssistantActivity.background)/g' source-v08/app/src/main/java/com/hotbet/analyzer/AssistantActivity.kt
-
-      - name: Build version 0.8 APK
-        working-directory: source-v08
+      - name: Build v0.9 debug APK
+        working-directory: source-v09
         run: bash ./gradlew --no-daemon assembleDebug
 
       - name: Rename APK
         run: |
-          cp source-v08/app/build/outputs/apk/debug/app-debug.apk HotBetAnalyzer-v0.8.0-S23Ultra-debug.apk
+          cp source-v09/app/build/outputs/apk/debug/app-debug.apk \
+            source-v09/app/build/outputs/apk/debug/HotBetAnalyzer-v0.9.0-S23Ultra-debug.apk
 
-      - name: Upload APK
+      - name: Upload v0.9 APK
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-v0.8.0-S23Ultra-debug-apk
-          path: HotBetAnalyzer-v0.8.0-S23Ultra-debug.apk
+          name: HotBetAnalyzer-v0.9.0-S23Ultra-debug-apk
+          path: source-v09/app/build/outputs/apk/debug/HotBetAnalyzer-v0.9.0-S23Ultra-debug.apk
           if-no-files-found: error
           retention-days: 14
