@@ -36,26 +36,30 @@ object PredictionEngine {
         if (data.size < 10) return emptyList()
 
         val counts = DoubleArray(5) { 1.0 }
-        val transitions = Array(5) {
-            DoubleArray(5) { 0.5 }
-        }
 
-        // وزن بیشتر برای داده های جدیدتر
         data.forEachIndexed { index, value ->
-            val weight = 1.0 + index.toDouble() /
-                data.size.toDouble()
+            val weight = 0.75 + 0.75 *
+                (index + 1).toDouble() / data.size
 
             counts[bucket(value)] += weight
         }
 
-        // بررسی انتقال بین بازه های متوالی
+        val transitions = Array(5) {
+            DoubleArray(5) { 1.0 }
+        }
+
         for (i in 0 until data.size - 1) {
             val from = bucket(data[i])
             val to = bucket(data[i + 1])
-            transitions[from][to] += 1.0
+
+            val weight = 0.75 + 0.75 *
+                (i + 1).toDouble() / data.size
+
+            transitions[from][to] += weight
         }
 
         val total = counts.sum()
+
         val baseline = DoubleArray(5) {
             counts[it] / total
         }
@@ -65,7 +69,6 @@ object PredictionEngine {
 
         val results = mutableListOf<Forecast>()
 
-        // تخمین پنج دور آینده
         for (round in 1..5) {
 
             val next = DoubleArray(5)
@@ -79,9 +82,9 @@ object PredictionEngine {
                 }
             }
 
-            // ترکیب فراوانی تاریخی و الگوی انتقال
             val combined = DoubleArray(5) {
-                0.80 * baseline[it] + 0.20 * next[it]
+                0.65 * baseline[it] +
+                0.35 * next[it]
             }
 
             val sum = combined.sum()
@@ -90,9 +93,9 @@ object PredictionEngine {
                 combined[i] /= sum
             }
 
-            val best = combined.indices.maxByOrNull {
+            val best = combined.indices.maxBy {
                 combined[it]
-            } ?: 0
+            }
 
             results.add(
                 Forecast(
