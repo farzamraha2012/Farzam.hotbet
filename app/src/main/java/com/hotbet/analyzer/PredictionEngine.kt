@@ -1,4 +1,3 @@
-
 package com.example.hotbetanalyzer
 
 import kotlin.math.roundToInt
