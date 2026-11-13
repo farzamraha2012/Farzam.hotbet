@@ -1,4 +1,4 @@
-package com.example.hotbetanalyzer
+ package com.example.hotbetanalyzer
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
