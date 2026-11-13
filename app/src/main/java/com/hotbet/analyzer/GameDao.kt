@@ -58,3 +58,4 @@ interface GameDao {
     @Query("DELETE FROM game_sessions WHERE id = :sessionId")
     suspend fun deleteSession(sessionId: Long)
 }
+ 
