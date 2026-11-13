@@ -1,3 +1,4 @@
+
 package com.example.hotbetanalyzer
 
 import kotlin.math.exp
@@ -9,7 +10,8 @@ object PredictionEngine {
     data class Forecast(
         val round: Int,
         val range: String,
-        val probabilityPercent: Int
+        val probabilityPercent: Int,
+        val probabilities: List<String>
     )
 
     private val ranges = listOf(
@@ -30,10 +32,14 @@ object PredictionEngine {
 
     private fun normalize(values: DoubleArray): DoubleArray {
         val total = values.sum()
+
         if (total <= 0.0) {
             return DoubleArray(5) { 0.2 }
         }
-        return DoubleArray(5) { values[it] / total }
+
+        return DoubleArray(5) {
+            values[it] / total
+        }
     }
 
     fun forecast(history: List<Double>): List<Forecast> {
@@ -44,16 +50,12 @@ object PredictionEngine {
 
         if (data.size < 10) return emptyList()
 
-        val currentBucket = bucket(data.last())
         val results = mutableListOf<Forecast>()
 
-        // Calculate each future round independently.
         for (horizon in 1..5) {
 
-            // Different decay rates for different forecast horizons.
             val halfLife = 3.0 + horizon * 2.5
 
-            // Recency-weighted historical distribution.
             val frequency = DoubleArray(5) { 0.5 }
 
             data.forEachIndexed { index, value ->
@@ -69,8 +71,8 @@ object PredictionEngine {
 
             val baseline = normalize(frequency)
 
-            // Estimate the distribution at this specific future horizon.
-            // Historical transitions are matched against the latest bucket.
+            val currentBucket = bucket(data.last())
+
             val conditional = DoubleArray(5) {
                 0.5 + baseline[it] * 2.0
             }
@@ -96,37 +98,36 @@ object PredictionEngine {
 
             val conditionalDistribution = normalize(conditional)
 
-            // Combine historical frequency and conditional evidence.
             val combined = DoubleArray(5) { index ->
-
                 0.60 * baseline[index] +
                 0.40 * conditionalDistribution[index]
             }
 
             val probabilities = normalize(combined)
 
-            // Show the three strongest ranges.
             val topThree = probabilities.indices
                 .sortedByDescending { probabilities[it] }
                 .take(3)
 
-            val description = topThree.joinToString("  |  ") {
-                index ->
-                val percent =
-                    (probabilities[index] * 100).roundToInt()
+            val probabilityList = topThree.map { index ->
+
+                val percent = (
+                    probabilities[index] * 100
+                ).roundToInt()
 
                 "${ranges[index]} (${percent}٪)"
             }
 
-            val bestProbability = (
-                probabilities[topThree.first()] * 100
-            ).roundToInt()
+            val bestIndex = topThree.first()
 
             results.add(
                 Forecast(
                     round = horizon,
-                    range = description,
-                    probabilityPercent = bestProbability
+                    range = ranges[bestIndex],
+                    probabilityPercent = (
+                        probabilities[bestIndex] * 100
+                    ).roundToInt(),
+                    probabilities = probabilityList
                 )
             )
         }
