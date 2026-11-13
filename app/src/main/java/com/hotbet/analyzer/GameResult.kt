@@ -36,3 +36,4 @@ data class GameResult(
 
     val ocrConfidence: Float? = null
 )
+ 
