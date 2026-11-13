@@ -1,4 +1,3 @@
-
 package com.example.hotbetanalyzer
 
 import kotlin.math.exp
@@ -8,10 +7,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Statistical range estimator.
- *
- * This estimates historical frequencies and ranges.
- * It cannot guarantee the next result of a genuinely random game.
+ * Five-range statistical estimator.
+ * Probabilities describe historical statistical estimates,
+ * not guaranteed outcomes of a random game.
  */
 object PredictionEngine {
 
@@ -23,10 +21,9 @@ object PredictionEngine {
     )
 
     private const val BUCKET_COUNT = 5
-    private const val MIN_HISTORY = 10
     private const val MODEL_COUNT = 5
+    private const val MIN_HISTORY = 10
     private const val MAX_BACKTEST_ORIGINS = 60
-    private const val PRIOR_STRENGTH = 3.0
 
     private val ranges = listOf(
         "0 تا 2",
@@ -56,33 +53,40 @@ object PredictionEngine {
         val safe = DoubleArray(BUCKET_COUNT) {
             max(0.000001, values[it])
         }
+
         val total = safe.sum()
-        return DoubleArray(BUCKET_COUNT) { safe[it] / total }
+
+        return DoubleArray(BUCKET_COUNT) {
+            safe[it] / total
+        }
     }
 
-    private fun historicalPrior(data: List<Double>): DoubleArray {
-        val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
-        data.forEach { counts[bucket(it)] += 1.0 }
-        return normalize(counts)
+    private fun normalizeWeights(values: DoubleArray): DoubleArray {
+        val safe = DoubleArray(MODEL_COUNT) {
+            max(0.000001, values[it])
+        }
+
+        val total = safe.sum()
+
+        return DoubleArray(MODEL_COUNT) {
+            safe[it] / total
+        }
     }
 
     // MODEL 1: Overall historical distribution.
     private fun frequencyModel(data: List<Double>): DoubleArray {
         val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
 
-        data.forEachIndexed { index, value ->
-            val recencyWeight =
-                0.85 + 0.30 * (index + 1.0) / data.size
-
-            counts[bucket(value)] += recencyWeight
+        data.forEach { value ->
+            counts[bucket(value)] += 1.0
         }
 
         return normalize(counts)
     }
 
-    // MODEL 2: Exponential time-decay.
+    // MODEL 2: Recency-weighted distribution.
     private fun recencyModel(data: List<Double>): DoubleArray {
-        val counts = DoubleArray(BUCKET_COUNT) { 0.75 }
+        val counts = DoubleArray(BUCKET_COUNT) { 0.8 }
 
         val halfLife = max(8.0, data.size * 0.22)
 
@@ -96,20 +100,23 @@ object PredictionEngine {
         return normalize(counts)
     }
 
-    // MODEL 3: Horizon-sensitive recent window.
+    // MODEL 3: Different windows for different horizons.
     private fun shortTermModel(
         data: List<Double>,
         horizon: Int
     ): DoubleArray {
 
-        val windowSize = min(data.size, 8 + horizon * 5)
-        val window = data.takeLast(windowSize)
+        val windowSize = min(
+            data.size,
+            8 + horizon * 5
+        )
 
+        val window = data.takeLast(windowSize)
         val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
 
         window.forEachIndexed { index, value ->
-            val weight =
-                0.7 + 0.6 * (index + 1.0) / window.size
+            val weight = 0.7 +
+                0.6 * (index + 1.0) / window.size
 
             counts[bucket(value)] += weight
         }
@@ -123,48 +130,49 @@ object PredictionEngine {
         horizon: Int
     ): DoubleArray {
 
-        val currentBucket = bucket(data.last())
-        val prior = historicalPrior(data)
+        val prior = frequencyModel(data)
+        val current = bucket(data.last())
 
         val counts = DoubleArray(BUCKET_COUNT) {
-            prior[it] * PRIOR_STRENGTH
+            prior[it] * 4.0
         }
 
-        if (data.size > horizon) {
-            for (i in 0 until data.size - horizon) {
+        for (i in 0 until data.size - horizon) {
 
-                if (bucket(data[i]) == currentBucket) {
-                    counts[bucket(data[i + horizon])] += 1.0
-                }
+            if (bucket(data[i]) == current) {
+                val target = bucket(data[i + horizon])
+                counts[target] += 1.0
             }
         }
 
         return normalize(counts)
     }
 
-    // MODEL 5: Historical sequence matching.
+    // MODEL 5: Two-step sequence matching.
     private fun sequenceModel(
         data: List<Double>,
         horizon: Int
     ): DoubleArray {
 
-        val prior = historicalPrior(data)
+        val prior = frequencyModel(data)
 
         val counts = DoubleArray(BUCKET_COUNT) {
-            prior[it] * (PRIOR_STRENGTH + 2.0)
+            prior[it] * 6.0
         }
 
-        if (data.size < 3) return normalize(counts)
+        if (data.size < 3) {
+            return normalize(counts)
+        }
 
         val previous = bucket(data[data.lastIndex - 1])
         val current = bucket(data.last())
 
         for (origin in 2 until data.size - horizon + 1) {
 
-            if (
-                bucket(data[origin - 2]) == previous &&
-                bucket(data[origin - 1]) == current
-            ) {
+            val first = bucket(data[origin - 2])
+            val second = bucket(data[origin - 1])
+
+            if (first == previous && second == current) {
 
                 val targetIndex = origin + horizon - 1
 
@@ -180,15 +188,18 @@ object PredictionEngine {
     private fun modelPredictions(
         data: List<Double>,
         horizon: Int
-    ): Array<DoubleArray> = arrayOf(
-        frequencyModel(data),
-        recencyModel(data),
-        shortTermModel(data, horizon),
-        transitionModel(data, horizon),
-        sequenceModel(data, horizon)
-    )
+    ): Array<DoubleArray> {
 
-    // Adaptive model weights using walk-forward evaluation.
+        return arrayOf(
+            frequencyModel(data),
+            recencyModel(data),
+            shortTermModel(data, horizon),
+            transitionModel(data, horizon),
+            sequenceModel(data, horizon)
+        )
+    }
+
+    // Walk-forward evaluation without using future observations.
     private fun adaptiveWeights(
         data: List<Double>,
         horizon: Int
@@ -198,23 +209,20 @@ object PredictionEngine {
         val tests = IntArray(MODEL_COUNT)
 
         val firstOrigin = max(
-            MIN_HISTORY - 1,
+            MIN_HISTORY,
             data.size - MAX_BACKTEST_ORIGINS - horizon + 1
         )
 
-        val lastOriginExclusive = data.size - horizon + 1
+        val lastOrigin = data.size - horizon + 1
 
-        for (origin in firstOrigin until lastOriginExclusive) {
-
-            if (origin < MIN_HISTORY - 1) continue
+        for (origin in firstOrigin until lastOrigin) {
 
             val training = data.subList(0, origin)
-
             val targetIndex = origin + horizon - 1
 
             if (targetIndex !in data.indices) continue
 
-            val actualBucket = bucket(data[targetIndex])
+            val actual = bucket(data[targetIndex])
 
             val predictions = modelPredictions(
                 training,
@@ -225,7 +233,7 @@ object PredictionEngine {
 
                 val probability = max(
                     0.000001,
-                    predictions[model][actualBucket]
+                    predictions[model][actual]
                 )
 
                 losses[model] += -ln(probability)
@@ -252,42 +260,29 @@ object PredictionEngine {
             scores[model] = exp(-averageLoss)
         }
 
-        val normalizedScores = normalizeModelWeights(scores)
+        val learned = normalizeWeights(scores)
 
+        // Avoid excessive weight changes from small samples.
         return DoubleArray(MODEL_COUNT) {
-            normalizedScores[it] * 0.85 +
-                (0.15 / MODEL_COUNT)
+            learned[it] * 0.85 + 0.03
         }
     }
 
-    private fun normalizeModelWeights(
-        input: DoubleArray
-    ): DoubleArray {
-
-        val safe = DoubleArray(MODEL_COUNT) {
-            max(0.000001, input[it])
-        }
-
-        val total = safe.sum()
-
-        return DoubleArray(MODEL_COUNT) {
-            safe[it] / total
-        }
-    }
-
-    // Combine all five models.
+    // Combine the five statistical models.
     private fun combinedForecast(
         data: List<Double>,
         horizon: Int,
         weights: DoubleArray
     ): DoubleArray {
 
-        val predictions = modelPredictions(data, horizon)
+        val predictions = modelPredictions(
+            data,
+            horizon
+        )
 
         val combined = DoubleArray(BUCKET_COUNT)
 
         for (model in 0 until MODEL_COUNT) {
-
             for (category in 0 until BUCKET_COUNT) {
 
                 combined[category] +=
@@ -299,45 +294,42 @@ object PredictionEngine {
         return normalize(combined)
     }
 
-    private fun bestIndex(
-        probabilities: DoubleArray
-    ): Int {
-
-        var best = 0
-
-        for (i in 1 until probabilities.size) {
-
-            if (probabilities[i] > probabilities[best]) {
-                best = i
-            }
-        }
-
-        return best
-    }
-
+    // Largest remainder method: percentages always total 100.
     private fun toPercentages(
-        weights: DoubleArray
+        probabilities: DoubleArray
     ): List<Int> {
 
-        val result = weights.map {
-            (it * 100.0).roundToInt()
+        val result = probabilities.map {
+            (it * 100.0).toInt()
         }.toMutableList()
 
-        val difference = 100 - result.sum()
+        val remainders = probabilities.mapIndexed { index, value ->
+            index to (value * 100.0 - result[index])
+        }
 
-        val largest = result.indices.maxByOrNull {
-            result[it]
-        } ?: 0
+        var remaining = 100 - result.sum()
 
-        result[largest] += difference
+        val order = remainders.sortedByDescending {
+            it.second
+        }
+
+        for (entry in order) {
+            if (remaining <= 0) break
+            result[entry.first]++
+            remaining--
+        }
 
         return result
     }
 
-    // Generate five separate horizon estimates.
-    fun forecast(
-        history: List<Double>
-    ): List<Forecast> {
+    private fun bestIndex(percentages: List<Int>): Int {
+        return percentages.indices.maxByOrNull {
+            percentages[it]
+        } ?: 0
+    }
+
+    // Five separate horizons, each with all five ranges.
+    fun forecast(history: List<Double>): List<Forecast> {
 
         val data = history.filter {
             it.isFinite() &&
@@ -358,22 +350,29 @@ object PredictionEngine {
                 horizon
             )
 
-            val probabilities = combinedForecast(
+            val distribution = combinedForecast(
                 data,
                 horizon,
                 weights
             )
 
-            val best = bestIndex(probabilities)
+            val percentages = toPercentages(distribution)
+            val best = bestIndex(percentages)
+
+            // Keep all five categories, not only alternatives.
+            val allRanges = ranges.mapIndexed { index, name ->
+
+                val star = if (index == best) "⭐" else ""
+
+                "$star$name: ${percentages[index]}٪"
+            }
 
             results.add(
                 Forecast(
                     round = horizon,
                     range = ranges[best],
-                    probabilityPercent =
-                        (probabilities[best] * 100.0)
-                            .roundToInt(),
-                    probabilities = emptyList()
+                    probabilityPercent = percentages[best],
+                    probabilities = allRanges
                 )
             )
         }
@@ -381,7 +380,7 @@ object PredictionEngine {
         return results
     }
 
-    // Model weight report for CaptureService.
+    // Model contribution report.
     fun modelWeightReport(
         history: List<Double>
     ): Map<String, Int> {
