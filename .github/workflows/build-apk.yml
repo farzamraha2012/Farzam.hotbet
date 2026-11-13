@@ -1,5 +1,5 @@
 
-name: Build HotBetAnalyzer v0.9.2
+name: Build HotBetAnalyzer v0.9.3
 
 on:
   workflow_dispatch:
@@ -60,10 +60,10 @@ jobs:
 
           mkdir -p release
 
-          cp "$APK" release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk
+          cp "$APK" release/HotBetAnalyzer-v0.9.3-S23Ultra-debug.apk
 
           echo "Calculating SHA256..."
-          sha256sum release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk \
+          sha256sum release/HotBetAnalyzer-v0.9.3-S23Ultra-debug.apk \
             > release/SHA256SUMS.txt
 
           ls -lh release/
@@ -71,7 +71,7 @@ jobs:
       - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-v0.9.2-backup
+          name: HotBetAnalyzer-v0.9.3-backup
           path: release/*
           if-no-files-found: error
           retention-days: 14
@@ -79,17 +79,17 @@ jobs:
       - name: Publish direct APK release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.2
-          name: HotBetAnalyzer v0.9.2
+          tag_name: v0.9.3
+          name: HotBetAnalyzer v0.9.3
           body: |
-            HotBetAnalyzer v0.9.2
+            HotBetAnalyzer v0.9.3
 
             Android debug APK for Samsung Galaxy S23 Ultra.
 
             The APK was checked before publication.
             SHA256 checksum is included.
           files: |
-            release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk
+            release/HotBetAnalyzer-v0.9.3-S23Ultra-debug.apk
             release/SHA256SUMS.txt
           fail_on_unmatched_files: true
           overwrite_files: true
