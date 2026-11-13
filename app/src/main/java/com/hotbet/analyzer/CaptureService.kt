@@ -39,6 +39,7 @@ class CaptureService : Service() {
         private const val MAX_VISIBLE_ROWS = 35
         private const val MAX_NEW_PER_SCAN = 12
         private const val FORECAST_SIZE = 5
+        private const val PREFS = "hotbet_phoenix_stats"
     }
 
     private var projection: MediaProjection? = null
@@ -67,29 +68,37 @@ class CaptureService : Service() {
 
     private var overlay: View? = null
     private var windowManager: WindowManager? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
 
     private var statusText: TextView? = null
     private var statsText: TextView? = null
+    private var instagramText: TextView? = null
+    private var collapseButton: TextView? = null
+    private var details: LinearLayout? = null
 
-    // Oldest -> newest
+    private var isCompact = false
+
+    // Oldest -> newest.
     private val history = mutableListOf<Double>()
 
     private var forecasts =
         emptyList<PredictionEngine.Forecast>()
 
-    // Completed rounds in the current five-round cycle.
     private var completedForecastRounds = 0
-
     private var forecastActive = false
-
-    // Total newly detected results in this session.
     private var totalNewRounds = 0
 
-    // Newest -> oldest, as displayed by the website.
+    // Newest -> oldest, as shown on the website.
     private var previousVisible = emptyList<Double>()
 
     private var statusMessage =
         "در انتظار خواندن تاریخچه ضرایب..."
+
+    // Persistent model evaluation statistics.
+    private var evaluatedRounds = 0
+    private var successfulRanges = 0
+
+    private var modelReport: Map<String, Int> = emptyMap()
 
     private val number = Pattern.compile(
         "(?<![0-9])([0-9]{1,4}[.,][0-9]{1,2})(?![0-9])"
@@ -105,6 +114,7 @@ class CaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        loadEvaluationStats()
     }
 
     override fun onStartCommand(
@@ -118,8 +128,8 @@ class CaptureService : Service() {
         }
 
         val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("HOTBET • تحلیل‌گر فعال")
-            .setContentText("در حال خواندن تاریخچه ضرایب")
+            .setContentTitle("HOTBET • Phoenix Analyzer")
+            .setContentText("در حال تحلیل تاریخچه ضرایب")
             .setSmallIcon(R.drawable.ic_stat_capture)
             .setOngoing(true)
             .build()
@@ -193,10 +203,7 @@ class CaptureService : Service() {
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-
-            setPadding(
-                px(10), px(9), px(10), px(9)
-            )
+            setPadding(px(9), px(8), px(9), px(8))
 
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -212,13 +219,14 @@ class CaptureService : Service() {
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
 
+        // Header: title, persistent collapse control and close control.
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
         val title = TextView(this).apply {
-            text = "HOTBET • پنج دور آینده"
+            text = "🔥 HOTBET"
             textSize = 13f
             setTextColor(gold)
             setTypeface(null, Typeface.BOLD)
@@ -234,39 +242,43 @@ class CaptureService : Service() {
             )
         )
 
-        val collapse = TextView(this).apply {
+        collapseButton = TextView(this).apply {
             text = "−"
-            textSize = 21f
+            textSize = 23f
+            gravity = Gravity.CENTER
             setTextColor(white)
-            setPadding(px(5), 0, px(5), 0)
+            setPadding(px(9), px(1), px(9), px(1))
+            background = buttonBackground(dp, px(1))
+            setOnClickListener {
+                toggleCompactMode()
+            }
         }
 
         val close = TextView(this).apply {
             text = "×"
-            textSize = 23f
+            textSize = 24f
+            gravity = Gravity.CENTER
             setTextColor(white)
-            setPadding(px(5), 0, px(3), 0)
-            setOnClickListener { stopSelf() }
+            setPadding(px(9), px(1), px(9), px(1))
+            background = buttonBackground(dp, px(1))
+            setOnClickListener {
+                stopSelf()
+            }
         }
 
-        header.addView(collapse)
+        // Keep a visible gap between both controls.
+        header.addView(collapseButton)
+        header.addView(
+            View(this),
+            LinearLayout.LayoutParams(px(7), 1)
+        )
         header.addView(close)
+
         panel.addView(header)
 
-        val details = LinearLayout(this).apply {
+        // Details can be hidden without removing the header.
+        details = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-        }
-
-        collapse.setOnClickListener {
-            details.visibility =
-                if (details.visibility == View.VISIBLE) {
-                    View.GONE
-                } else {
-                    View.VISIBLE
-                }
-
-            collapse.text =
-                if (details.visibility == View.VISIBLE) "−" else "+"
         }
 
         statusText = TextView(this).apply {
@@ -274,10 +286,10 @@ class CaptureService : Service() {
             setTextColor(dim)
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-            setPadding(0, px(7), 0, px(7))
+            setPadding(0, px(7), 0, px(6))
         }
 
-        details.addView(statusText)
+        details!!.addView(statusText)
 
         val legend = TextView(this).apply {
             text = "زیر۲ / ۲-۴ / ۴-۶ / ۶-۱۰ / بالای۱۰"
@@ -285,10 +297,10 @@ class CaptureService : Service() {
             setTextColor(dim)
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-            setPadding(px(3), px(4), px(3), px(4))
+            setPadding(px(2), px(3), px(2), px(4))
         }
 
-        details.addView(legend)
+        details!!.addView(legend)
 
         statsText = TextView(this).apply {
             textSize = 10f
@@ -301,23 +313,35 @@ class CaptureService : Service() {
 
             background = GradientDrawable().apply {
                 setColor(Color.rgb(39, 46, 59))
-                cornerRadius = 11 * dp
+                cornerRadius = 10 * dp
             }
         }
 
-        details.addView(statsText)
+        details!!.addView(statsText)
 
         val disclaimer = TextView(this).apply {
-            text = "احتمال‌های آماری هستند؛ تضمین نتیجه نیستند."
+            text = "برآورد آماری؛ بدون تضمین نتیجه"
             textSize = 9f
             setTextColor(dim)
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-            setPadding(0, px(7), 0, px(3))
+            setPadding(0, px(6), 0, px(3))
         }
 
-        details.addView(disclaimer)
+        details!!.addView(disclaimer)
         panel.addView(details)
+
+        // Instagram ID remains visible in both expanded and compact modes.
+        instagramText = TextView(this).apply {
+            text = "◎  @2farzam2"
+            textSize = 11f
+            setTextColor(gold)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(0, px(7), 0, px(2))
+        }
+
+        panel.addView(instagramText)
 
         val displayWidth =
             resources.displayMetrics.widthPixels
@@ -341,6 +365,9 @@ class CaptureService : Service() {
             y = px(70)
         }
 
+        overlayParams = params
+
+        // Drag the panel using its header.
         header.setOnTouchListener(
             object : View.OnTouchListener {
 
@@ -348,6 +375,7 @@ class CaptureService : Service() {
                 private var startY = 0
                 private var touchX = 0f
                 private var touchY = 0f
+                private var moved = false
 
                 override fun onTouch(
                     v: View,
@@ -361,27 +389,41 @@ class CaptureService : Service() {
                             startY = params.y
                             touchX = event.rawX
                             touchY = event.rawY
-                            true
+                            moved = false
+                            false
                         }
 
                         MotionEvent.ACTION_MOVE -> {
-                            params.x = (
-                                startX + event.rawX - touchX
-                            ).toInt().coerceAtLeast(0)
 
-                            params.y = (
-                                startY + event.rawY - touchY
-                            ).toInt().coerceAtLeast(0)
+                            val dx = event.rawX - touchX
+                            val dy = event.rawY - touchY
 
-                            try {
-                                wm.updateViewLayout(panel, params)
-                            } catch (_: Exception) {
+                            if (
+                                kotlin.math.abs(dx) > px(4) ||
+                                kotlin.math.abs(dy) > px(4)
+                            ) {
+                                moved = true
                             }
 
-                            true
+                            if (moved) {
+                                params.x = (
+                                    startX + dx
+                                ).toInt().coerceAtLeast(0)
+
+                                params.y = (
+                                    startY + dy
+                                ).toInt().coerceAtLeast(0)
+
+                                try {
+                                    wm.updateViewLayout(panel, params)
+                                } catch (_: Exception) {
+                                }
+                            }
+
+                            moved
                         }
 
-                        MotionEvent.ACTION_UP -> true
+                        MotionEvent.ACTION_UP -> moved
                         else -> false
                     }
                 }
@@ -392,6 +434,38 @@ class CaptureService : Service() {
         overlay = panel
 
         render()
+    }
+
+    private fun buttonBackground(
+        dp: Float,
+        stroke: Int
+    ): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.rgb(48, 54, 65))
+            cornerRadius = 8 * dp
+            setStroke(stroke, Color.rgb(115, 87, 39))
+        }
+    }
+
+    private fun toggleCompactMode() {
+
+        val currentDetails = details ?: return
+        val button = collapseButton ?: return
+        val panel = overlay ?: return
+        val params = overlayParams ?: return
+
+        isCompact = !isCompact
+
+        currentDetails.visibility =
+            if (isCompact) View.GONE else View.VISIBLE
+
+        // The minus control remains visible and usable in both modes.
+        button.text = "−"
+
+        try {
+            windowManager?.updateViewLayout(panel, params)
+        } catch (_: Exception) {
+        }
     }
 
     // --------------------------------------------------
@@ -496,7 +570,6 @@ class CaptureService : Service() {
             val source = fullBitmap
                 ?: throw IllegalStateException("صفحه قابل خواندن نیست")
 
-            // History column on the supplied mobile website.
             val left = (source.width * 0.10f)
                 .toInt().coerceIn(0, source.width - 1)
 
@@ -651,8 +724,25 @@ class CaptureService : Service() {
     }
 
     // --------------------------------------------------
-    // SESSION RESET
+    // SESSION AND PERSISTENT EVALUATION
     // --------------------------------------------------
+
+    private fun loadEvaluationStats() {
+
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+
+        evaluatedRounds = prefs.getInt("evaluated", 0)
+        successfulRanges = prefs.getInt("successful", 0)
+    }
+
+    private fun saveEvaluationStats() {
+
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+            .edit()
+            .putInt("evaluated", evaluatedRounds)
+            .putInt("successful", successfulRanges)
+            .apply()
+    }
 
     private fun resetSession() {
 
@@ -672,11 +762,7 @@ class CaptureService : Service() {
         lastAt = 0L
         processing.set(false)
 
-        getSharedPreferences(
-            "captured_history",
-            MODE_PRIVATE
-        ).edit().clear().apply()
-
+        // Do not clear persistent evaluation statistics.
         statusMessage =
             "جلسه جدید؛ در انتظار خواندن تاریخچه..."
     }
@@ -713,8 +799,12 @@ class CaptureService : Service() {
         } catch (_: Exception) {}
 
         overlay = null
+        overlayParams = null
         statusText = null
         statsText = null
+        instagramText = null
+        collapseButton = null
+        details = null
 
         processing.set(false)
     }
@@ -800,8 +890,46 @@ class CaptureService : Service() {
     }
 
     // --------------------------------------------------
-    // FORECAST CYCLE
+    // FORECAST AND EVALUATION
     // --------------------------------------------------
+
+    private fun rangeIndex(range: String): Int {
+        return when (range) {
+            "0 تا 2" -> 0
+            "2 تا 4" -> 1
+            "4 تا 6" -> 2
+            "6 تا 10" -> 3
+            "10 به بالا" -> 4
+            else -> -1
+        }
+    }
+
+    private fun bucket(value: Double): Int = when {
+        value < 2.0 -> 0
+        value < 4.0 -> 1
+        value < 6.0 -> 2
+        value < 10.0 -> 3
+        else -> 4
+    }
+
+    private fun evaluateForecast(
+        forecast: PredictionEngine.Forecast,
+        actual: Double
+    ) {
+
+        val predicted = rangeIndex(forecast.range)
+        val observed = bucket(actual)
+
+        if (predicted < 0) return
+
+        evaluatedRounds++
+
+        if (predicted == observed) {
+            successfulRanges++
+        }
+
+        saveEvaluationStats()
+    }
 
     private fun startForecastCycle() {
 
@@ -819,9 +947,25 @@ class CaptureService : Service() {
         forecasts = result
         completedForecastRounds = 0
         forecastActive = true
+
+        modelReport =
+            PredictionEngine.modelWeightReport(history.toList())
     }
 
     private fun registerNewRound(value: Double) {
+
+        // Evaluate the prediction made for this actual round.
+        if (
+            forecastActive &&
+            completedForecastRounds < forecasts.size
+        ) {
+            evaluateForecast(
+                forecasts[completedForecastRounds],
+                value
+            )
+
+            completedForecastRounds++
+        }
 
         history.add(value)
 
@@ -831,8 +975,6 @@ class CaptureService : Service() {
 
         totalNewRounds++
 
-        // Start the first forecast only after collecting
-        // ten valid results.
         if (!forecastActive && history.size >= 10) {
             startForecastCycle()
             return
@@ -840,10 +982,7 @@ class CaptureService : Service() {
 
         if (!forecastActive) return
 
-        completedForecastRounds++
-
-        // When all five rounds are completed,
-        // calculate a completely new five-round cycle.
+        // Generate a fresh five-round cycle after five results.
         if (completedForecastRounds >= FORECAST_SIZE) {
             startForecastCycle()
         }
@@ -920,9 +1059,6 @@ class CaptureService : Service() {
 
         if (newCount > 0) {
 
-            // Process each newly detected result individually.
-            // This prevents skipped completion marks when
-            // several rows appear between OCR scans.
             val newValues = visible
                 .take(newCount)
                 .asReversed()
@@ -956,10 +1092,18 @@ class CaptureService : Service() {
                 "در انتظار تکمیل 10 نمونه"
             }
 
+        val accuracy = if (evaluatedRounds > 0) {
+            successfulRanges * 100 / evaluatedRounds
+        } else {
+            0
+        }
+
         val counterText =
-            "نمونه: ${history.size}  |  " +
-            "دور جدید: $totalNewRounds  |  " +
-            "چرخه: $cycleText"
+            "نمونه: ${history.size} | " +
+            "دور جدید: $totalNewRounds\n" +
+            "چرخه: $cycleText | " +
+            "ارزیابی: $evaluatedRounds | " +
+            "تطبیق بازه: $accuracy٪"
 
         val forecastText = if (forecasts.isEmpty()) {
 
@@ -967,7 +1111,8 @@ class CaptureService : Service() {
 
         } else {
 
-            forecasts.take(FORECAST_SIZE)
+            val predictionLines = forecasts
+                .take(FORECAST_SIZE)
                 .mapIndexed { index, forecast ->
 
                     val mark =
@@ -977,15 +1122,26 @@ class CaptureService : Service() {
                             "○"
                         }
 
-                    val distribution =
-                        forecast.probabilities.joinToString("·")
+                    val alternatives =
+                        forecast.probabilities.joinToString(" | ")
 
                     "$mark دور ${forecast.round}: " +
                     "${forecast.range} " +
                     "(${forecast.probabilityPercent}٪)\n" +
-                    "$distribution"
+                    alternatives
                 }
                 .joinToString("\n")
+
+            val weightsText = if (modelReport.isEmpty()) {
+                ""
+            } else {
+                "\n\nوزن مدل‌ها:\n" +
+                    modelReport.entries.joinToString(" | ") {
+                        "${it.key}: ${it.value}٪"
+                    }
+            }
+
+            predictionLines + weightsText
         }
 
         ui.post {
