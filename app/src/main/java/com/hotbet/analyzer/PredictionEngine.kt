@@ -1,7 +1,7 @@
 
 package com.example.hotbetanalyzer
 
-import kotlin.math.exp
+import kotlin.math.sqrt
 import kotlin.math.roundToInt
 
 object PredictionEngine {
@@ -9,12 +9,9 @@ object PredictionEngine {
     data class Forecast(
         val round: Int,
         val range: String,
-        val probabilityPercent: Int
+        val probabilityPercent: Int,
+        val probabilities: List<Int>
     )
-
-    private const val BUCKET_COUNT = 5
-    private const val MIN_HISTORY = 10
-    private const val RECENT_WINDOW = 30
 
     private val ranges = listOf(
         "0 تا 2",
@@ -23,6 +20,9 @@ object PredictionEngine {
         "6 تا 10",
         "10 به بالا"
     )
+
+    private const val BUCKET_COUNT = 5
+    private const val MAX_ROUNDS = 5
 
     private fun bucket(value: Double): Int = when {
         value < 2.0 -> 0
@@ -36,9 +36,7 @@ object PredictionEngine {
         val total = values.sum()
 
         if (total <= 0.0) {
-            return DoubleArray(BUCKET_COUNT) {
-                1.0 / BUCKET_COUNT
-            }
+            return DoubleArray(BUCKET_COUNT) { 1.0 / BUCKET_COUNT }
         }
 
         return DoubleArray(BUCKET_COUNT) {
@@ -46,142 +44,16 @@ object PredictionEngine {
         }
     }
 
-    // Model 1: Overall historical frequency
-    private fun frequencyModel(data: List<Double>): DoubleArray {
-        val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
+    private fun toPercent(values: DoubleArray): List<Int> {
+        val result = values.map { (it * 100).roundToInt() }.toMutableList()
 
-        data.forEach {
-            counts[bucket(it)] += 1.0
-        }
+        // Keep the displayed probabilities equal to exactly 100%.
+        val difference = 100 - result.sum()
+        val largest = result.indices.maxBy { result[it] }
 
-        return normalize(counts)
-    }
+        result[largest] += difference
 
-    // Model 2: Recent history frequency
-    private fun recentModel(data: List<Double>): DoubleArray {
-        val recent = data.takeLast(RECENT_WINDOW)
-        val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
-
-        recent.forEach {
-            counts[bucket(it)] += 1.0
-        }
-
-        return normalize(counts)
-    }
-
-    // Model 3: Exponentially weighted frequency
-    private fun weightedModel(data: List<Double>): DoubleArray {
-        val counts = DoubleArray(BUCKET_COUNT) { 1.0 }
-
-        data.forEachIndexed { index, value ->
-            val age = (data.size - 1 - index).toDouble()
-            val weight = exp(-age / 25.0)
-
-            counts[bucket(value)] += weight
-        }
-
-        return normalize(counts)
-    }
-
-    // Build a smoothed transition matrix
-    private fun transitionMatrix(
-        data: List<Double>
-    ): Array<DoubleArray> {
-
-        val matrix = Array(BUCKET_COUNT) {
-            DoubleArray(BUCKET_COUNT) { 1.0 }
-        }
-
-        for (i in 0 until data.size - 1) {
-            val from = bucket(data[i])
-            val to = bucket(data[i + 1])
-
-            matrix[from][to] += 1.0
-        }
-
-        return Array(BUCKET_COUNT) { row ->
-            normalize(matrix[row])
-        }
-    }
-
-    // Model 4: Historical transition model
-    private fun transitionModel(
-        data: List<Double>,
-        horizon: Int
-    ): DoubleArray {
-
-        val matrix = transitionMatrix(data)
-        var current = DoubleArray(BUCKET_COUNT)
-
-        current[bucket(data.last())] = 1.0
-
-        repeat(horizon) {
-            val next = DoubleArray(BUCKET_COUNT)
-
-            for (from in 0 until BUCKET_COUNT) {
-                for (to in 0 until BUCKET_COUNT) {
-                    next[to] +=
-                        current[from] * matrix[from][to]
-                }
-            }
-
-            current = normalize(next)
-        }
-
-        return current
-    }
-
-    // Model 5: Recent transition model
-    private fun recentTransitionModel(
-        data: List<Double>,
-        horizon: Int
-    ): DoubleArray {
-
-        val recent = data.takeLast(RECENT_WINDOW)
-        val matrix = transitionMatrix(recent)
-
-        var current = DoubleArray(BUCKET_COUNT)
-        current[bucket(data.last())] = 1.0
-
-        repeat(horizon) {
-            val next = DoubleArray(BUCKET_COUNT)
-
-            for (from in 0 until BUCKET_COUNT) {
-                for (to in 0 until BUCKET_COUNT) {
-                    next[to] +=
-                        current[from] * matrix[from][to]
-                }
-            }
-
-            current = normalize(next)
-        }
-
-        return current
-    }
-
-    private fun combinedModel(
-        data: List<Double>,
-        horizon: Int
-    ): DoubleArray {
-
-        val model1 = frequencyModel(data)
-        val model2 = recentModel(data)
-        val model3 = weightedModel(data)
-        val model4 = transitionModel(data, horizon)
-        val model5 = recentTransitionModel(data, horizon)
-
-        val result = DoubleArray(BUCKET_COUNT)
-
-        for (i in 0 until BUCKET_COUNT) {
-            result[i] =
-                model1[i] * 0.15 +
-                model2[i] * 0.20 +
-                model3[i] * 0.20 +
-                model4[i] * 0.25 +
-                model5[i] * 0.20
-        }
-
-        return normalize(result)
+        return result
     }
 
     fun forecast(history: List<Double>): List<Forecast> {
@@ -190,30 +62,100 @@ object PredictionEngine {
             it.isFinite() && it >= 1.0 && it <= 10000.0
         }
 
-        if (data.size < MIN_HISTORY) {
-            return emptyList()
+        if (data.size < 10) return emptyList()
+
+        // 1. Calculate weighted historical frequencies.
+        val counts = DoubleArray(BUCKET_COUNT) { 1.5 }
+
+        data.forEachIndexed { index, value ->
+            val recency = (index + 1).toDouble() / data.size
+            val weight = 0.5 + 1.0 * recency
+
+            counts[bucket(value)] += weight
         }
 
+        val baseline = normalize(counts)
+
+        // 2. Calculate recent frequencies separately.
+        val recentData = data.takeLast(minOf(20, data.size))
+        val recentCounts = DoubleArray(BUCKET_COUNT) { 1.0 }
+
+        recentData.forEachIndexed { index, value ->
+            val weight = 0.5 + (index + 1).toDouble() /
+                recentData.size
+
+            recentCounts[bucket(value)] += weight
+        }
+
+        val recent = normalize(recentCounts)
+
+        // 3. Build a smoothed transition matrix.
+        val transitions = Array(BUCKET_COUNT) {
+            DoubleArray(BUCKET_COUNT) { 1.5 }
+        }
+
+        for (i in 0 until data.size - 1) {
+            val from = bucket(data[i])
+            val to = bucket(data[i + 1])
+
+            val recency = (i + 1).toDouble() / data.size
+            val weight = 0.5 + recency
+
+            transitions[from][to] += weight
+        }
+
+        // Normalize every transition row.
+        val transitionProbabilities = Array(BUCKET_COUNT) { row ->
+            normalize(transitions[row])
+        }
+
+        // 4. Calculate five separate forecast horizons.
         val results = mutableListOf<Forecast>()
 
-        for (round in 1..5) {
+        for (round in 1..MAX_ROUNDS) {
 
-            val probabilities = combinedModel(data, round)
+            var current = DoubleArray(BUCKET_COUNT) { 0.0 }
+            current[bucket(data.last())] = 1.0
 
-            val bestIndex = probabilities.indices.maxByOrNull {
+            // Apply the transition model for this specific horizon.
+            repeat(round) {
+                val next = DoubleArray(BUCKET_COUNT)
+
+                for (from in 0 until BUCKET_COUNT) {
+                    for (to in 0 until BUCKET_COUNT) {
+                        next[to] += current[from] *
+                            transitionProbabilities[from][to]
+                    }
+                }
+
+                current = normalize(next)
+            }
+
+            // Longer horizons rely less on the immediate transition.
+            val transitionWeight = 0.28 / sqrt(round.toDouble())
+            val recentWeight = 0.12 / round.toDouble()
+            val baselineWeight = 1.0 -
+                transitionWeight - recentWeight
+
+            val combined = DoubleArray(BUCKET_COUNT) { index ->
+                baseline[index] * baselineWeight +
+                    recent[index] * recentWeight +
+                    current[index] * transitionWeight
+            }
+
+            val probabilities = normalize(combined)
+            val best = probabilities.indices.maxBy {
                 probabilities[it]
-            } ?: 0
+            }
 
-            val confidence =
-                (probabilities[bestIndex] * 100.0)
-                    .roundToInt()
-                    .coerceIn(0, 100)
+            val percentages = toPercent(probabilities)
 
             results.add(
                 Forecast(
                     round = round,
-                    range = ranges[bestIndex],
-                    probabilityPercent = confidence
+                    range = ranges[best],
+                    probabilityPercent = percentages[best],
+                    probabilities = percentages
                 )
             )
         }
