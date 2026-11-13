@@ -1,13 +1,17 @@
 
-name: Build HotBetAnalyzer v0.9 APK
+name: Build HotBetAnalyzer v0.9.2
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, v0.8-test, v0.9-test]
+    branches:
+      - main
+      - master
+      - v0.8-test
+      - v0.9-test
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -23,31 +27,70 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools'
+          packages: platform-tools
 
       - name: Install Android SDK platform
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build APK from repository source
-        run: gradle --no-daemon clean assembleDebug
-
-      - name: Rename APK
+      - name: Build APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk \
-          app/build/outputs/apk/debug/HotBetAnalyzer-v0.9.1-S23Ultra-debug.apk
+          gradle --no-daemon clean assembleDebug
 
-      - name: Upload APK
+      - name: Verify APK
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          test -s "$APK"
+
+          echo "Checking APK archive..."
+          unzip -t "$APK"
+
+          echo "Checking Android package..."
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK"
+
+          mkdir -p release
+
+          cp "$APK" release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk
+
+          echo "Calculating SHA256..."
+          sha256sum release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk \
+            > release/SHA256SUMS.txt
+
+          ls -lh release/
+
+      - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-v0.9.1-S23Ultra-debug-apk
-          path: app/build/outputs/apk/debug/HotBetAnalyzer-v0.9.1-S23Ultra-debug.apk
+          name: HotBetAnalyzer-v0.9.2-backup
+          path: release/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish direct APK release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.9.2
+          name: HotBetAnalyzer v0.9.2
+          body: |
+            HotBetAnalyzer v0.9.2
+
+            Android debug APK for Samsung Galaxy S23 Ultra.
+
+            The APK was checked before publication.
+            SHA256 checksum is included.
+          files: |
+            release/HotBetAnalyzer-v0.9.2-S23Ultra-debug.apk
+            release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
