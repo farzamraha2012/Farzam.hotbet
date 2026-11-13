@@ -1,7 +1,7 @@
-
 package com.example.hotbetanalyzer
 
-import kotlin.math.sqrt
+import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.roundToInt
 
 object PredictionEngine {
@@ -9,8 +9,7 @@ object PredictionEngine {
     data class Forecast(
         val round: Int,
         val range: String,
-        val probabilityPercent: Int,
-        val probabilities: List<Int>
+        val probabilityPercent: Int
     )
 
     private val ranges = listOf(
@@ -20,9 +19,6 @@ object PredictionEngine {
         "6 تا 10",
         "10 به بالا"
     )
-
-    private const val BUCKET_COUNT = 5
-    private const val MAX_ROUNDS = 5
 
     private fun bucket(value: Double): Int = when {
         value < 2.0 -> 0
@@ -34,26 +30,10 @@ object PredictionEngine {
 
     private fun normalize(values: DoubleArray): DoubleArray {
         val total = values.sum()
-
         if (total <= 0.0) {
-            return DoubleArray(BUCKET_COUNT) { 1.0 / BUCKET_COUNT }
+            return DoubleArray(5) { 0.2 }
         }
-
-        return DoubleArray(BUCKET_COUNT) {
-            values[it] / total
-        }
-    }
-
-    private fun toPercent(values: DoubleArray): List<Int> {
-        val result = values.map { (it * 100).roundToInt() }.toMutableList()
-
-        // Keep the displayed probabilities equal to exactly 100%.
-        val difference = 100 - result.sum()
-        val largest = result.indices.maxBy { result[it] }
-
-        result[largest] += difference
-
-        return result
+        return DoubleArray(5) { values[it] / total }
     }
 
     fun forecast(history: List<Double>): List<Forecast> {
@@ -64,98 +44,89 @@ object PredictionEngine {
 
         if (data.size < 10) return emptyList()
 
-        // 1. Calculate weighted historical frequencies.
-        val counts = DoubleArray(BUCKET_COUNT) { 1.5 }
-
-        data.forEachIndexed { index, value ->
-            val recency = (index + 1).toDouble() / data.size
-            val weight = 0.5 + 1.0 * recency
-
-            counts[bucket(value)] += weight
-        }
-
-        val baseline = normalize(counts)
-
-        // 2. Calculate recent frequencies separately.
-        val recentData = data.takeLast(minOf(20, data.size))
-        val recentCounts = DoubleArray(BUCKET_COUNT) { 1.0 }
-
-        recentData.forEachIndexed { index, value ->
-            val weight = 0.5 + (index + 1).toDouble() /
-                recentData.size
-
-            recentCounts[bucket(value)] += weight
-        }
-
-        val recent = normalize(recentCounts)
-
-        // 3. Build a smoothed transition matrix.
-        val transitions = Array(BUCKET_COUNT) {
-            DoubleArray(BUCKET_COUNT) { 1.5 }
-        }
-
-        for (i in 0 until data.size - 1) {
-            val from = bucket(data[i])
-            val to = bucket(data[i + 1])
-
-            val recency = (i + 1).toDouble() / data.size
-            val weight = 0.5 + recency
-
-            transitions[from][to] += weight
-        }
-
-        // Normalize every transition row.
-        val transitionProbabilities = Array(BUCKET_COUNT) { row ->
-            normalize(transitions[row])
-        }
-
-        // 4. Calculate five separate forecast horizons.
+        val currentBucket = bucket(data.last())
         val results = mutableListOf<Forecast>()
 
-        for (round in 1..MAX_ROUNDS) {
+        // Calculate each future round independently.
+        for (horizon in 1..5) {
 
-            var current = DoubleArray(BUCKET_COUNT) { 0.0 }
-            current[bucket(data.last())] = 1.0
+            // Different decay rates for different forecast horizons.
+            val halfLife = 3.0 + horizon * 2.5
 
-            // Apply the transition model for this specific horizon.
-            repeat(round) {
-                val next = DoubleArray(BUCKET_COUNT)
+            // Recency-weighted historical distribution.
+            val frequency = DoubleArray(5) { 0.5 }
 
-                for (from in 0 until BUCKET_COUNT) {
-                    for (to in 0 until BUCKET_COUNT) {
-                        next[to] += current[from] *
-                            transitionProbabilities[from][to]
-                    }
-                }
+            data.forEachIndexed { index, value ->
 
-                current = normalize(next)
+                val age = (data.lastIndex - index).toDouble()
+
+                val weight = exp(
+                    -ln(2.0) * age / halfLife
+                )
+
+                frequency[bucket(value)] += weight
             }
 
-            // Longer horizons rely less on the immediate transition.
-            val transitionWeight = 0.28 / sqrt(round.toDouble())
-            val recentWeight = 0.12 / round.toDouble()
-            val baselineWeight = 1.0 -
-                transitionWeight - recentWeight
+            val baseline = normalize(frequency)
 
-            val combined = DoubleArray(BUCKET_COUNT) { index ->
-                baseline[index] * baselineWeight +
-                    recent[index] * recentWeight +
-                    current[index] * transitionWeight
+            // Estimate the distribution at this specific future horizon.
+            // Historical transitions are matched against the latest bucket.
+            val conditional = DoubleArray(5) {
+                0.5 + baseline[it] * 2.0
+            }
+
+            for (i in 0 until data.size - horizon) {
+
+                val from = bucket(data[i])
+
+                if (from != currentBucket) continue
+
+                val to = bucket(data[i + horizon])
+
+                val age = (
+                    data.lastIndex - (i + horizon)
+                ).toDouble()
+
+                val weight = exp(
+                    -ln(2.0) * age / halfLife
+                )
+
+                conditional[to] += weight
+            }
+
+            val conditionalDistribution = normalize(conditional)
+
+            // Combine historical frequency and conditional evidence.
+            val combined = DoubleArray(5) { index ->
+
+                0.60 * baseline[index] +
+                0.40 * conditionalDistribution[index]
             }
 
             val probabilities = normalize(combined)
-            val best = probabilities.indices.maxBy {
-                probabilities[it]
+
+            // Show the three strongest ranges.
+            val topThree = probabilities.indices
+                .sortedByDescending { probabilities[it] }
+                .take(3)
+
+            val description = topThree.joinToString("  |  ") {
+                index ->
+                val percent =
+                    (probabilities[index] * 100).roundToInt()
+
+                "${ranges[index]} (${percent}٪)"
             }
 
-            val percentages = toPercent(probabilities)
+            val bestProbability = (
+                probabilities[topThree.first()] * 100
+            ).roundToInt()
 
             results.add(
                 Forecast(
-                    round = round,
-                    range = ranges[best],
-                    probabilityPercent = percentages[best],
-                    probabilities = percentages
+                    round = horizon,
+                    range = description,
+                    probabilityPercent = bestProbability
                 )
             )
         }
