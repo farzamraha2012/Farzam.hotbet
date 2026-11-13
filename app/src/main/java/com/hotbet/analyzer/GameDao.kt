@@ -1,4 +1,4 @@
-package com.example.hotbetanalyzer
+ package com.example.hotbetanalyzer
 
 import androidx.room.Dao
 import androidx.room.Insert
