@@ -31,8 +31,7 @@ import kotlin.math.abs
 class CaptureService : Service() {
 
     companion object {
-        const val ACTION_START =
-            "com.example.hotbetanalyzer.START"
+        const val ACTION_START = "com.example.hotbetanalyzer.START"
 
         private const val CHANNEL = "screen_reader"
         private const val MAX_SAVED = 300
@@ -45,24 +44,17 @@ class CaptureService : Service() {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
-
     private var worker: HandlerThread? = null
     private var handler: Handler? = null
 
     private val ui = Handler(Looper.getMainLooper())
-
-    private val recognizer =
-        TextRecognition.getClient(
-            TextRecognizerOptions.DEFAULT_OPTIONS
-        )
-
-    @Volatile
-    private var lastAt = 0L
-
     private val processing = AtomicBoolean(false)
 
-    @Volatile
-    private var sessionGeneration = 0
+    private val recognizer =
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+    @Volatile private var lastAt = 0L
+    @Volatile private var sessionGeneration = 0
 
     private var noOverlapCount = 0
 
@@ -77,8 +69,11 @@ class CaptureService : Service() {
 
     private var isCompact = false
 
-    // History is always oldest -> newest.
+    // History order: oldest -> newest.
     private val history = mutableListOf<Double>()
+
+    // Website order: newest -> oldest.
+    private var previousVisible = emptyList<Double>()
 
     private var forecasts =
         emptyList<PredictionEngine.Forecast>()
@@ -87,16 +82,13 @@ class CaptureService : Service() {
     private var forecastActive = false
     private var totalNewRounds = 0
 
-    // Website order: newest -> oldest.
-    private var previousVisible = emptyList<Double>()
-
-    private var statusMessage =
-        "در انتظار خواندن تاریخچه ضرایب..."
-
     private var evaluatedRounds = 0
     private var successfulRanges = 0
 
     private var modelReport: Map<String, Int> = emptyMap()
+
+    private var statusMessage =
+        "در انتظار خواندن تاریخچه ضرایب..."
 
     private val number = Pattern.compile(
         "(?<![0-9])([0-9]{1,5}[.,][0-9]{1,2})(?![0-9])"
@@ -188,13 +180,10 @@ class CaptureService : Service() {
 
     private fun showOverlay() {
 
-        val wm = getSystemService(WINDOW_SERVICE)
-            as WindowManager
-
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         windowManager = wm
 
         val dp = resources.displayMetrics.density
-
         fun px(value: Int) = (value * dp).toInt()
 
         val white = Color.WHITE
@@ -202,12 +191,8 @@ class CaptureService : Service() {
         val gold = Color.rgb(225, 183, 77)
 
         val panel = LinearLayout(this).apply {
-
             orientation = LinearLayout.VERTICAL
-
-            setPadding(
-                px(9), px(8), px(9), px(8)
-            )
+            setPadding(px(9), px(8), px(9), px(8))
 
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -217,16 +202,11 @@ class CaptureService : Service() {
                 )
             ).apply {
                 cornerRadius = 14 * dp
-                setStroke(
-                    px(1),
-                    Color.rgb(115, 87, 39)
-                )
+                setStroke(px(1), Color.rgb(115, 87, 39))
             }
 
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
-
-        // HEADER
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -251,104 +231,64 @@ class CaptureService : Service() {
         )
 
         collapseButton = TextView(this).apply {
-
             text = "−"
             textSize = 22f
             gravity = Gravity.CENTER
             setTextColor(white)
-
-            setPadding(
-                px(8), px(1), px(8), px(1)
-            )
-
+            setPadding(px(8), px(1), px(8), px(1))
             background = buttonBackground(dp)
-
-            setOnClickListener {
-                toggleCompactMode()
-            }
+            setOnClickListener { toggleCompactMode() }
         }
 
         val close = TextView(this).apply {
-
             text = "×"
             textSize = 23f
             gravity = Gravity.CENTER
             setTextColor(white)
-
-            setPadding(
-                px(8), px(1), px(8), px(1)
-            )
-
+            setPadding(px(8), px(1), px(8), px(1))
             background = buttonBackground(dp)
-
-            setOnClickListener {
-                stopSelf()
-            }
+            setOnClickListener { stopSelf() }
         }
 
         header.addView(collapseButton)
-
-        header.addView(
-            View(this),
-            LinearLayout.LayoutParams(px(8), 1)
-        )
-
+        header.addView(View(this), LinearLayout.LayoutParams(px(8), 1))
         header.addView(close)
 
         panel.addView(header)
-
-        // DETAILS
 
         details = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
 
         statusText = TextView(this).apply {
-
             textSize = 10f
             setTextColor(dim)
-
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-
-            setPadding(
-                0, px(7), 0, px(6)
-            )
+            setPadding(0, px(7), 0, px(6))
         }
 
         details!!.addView(statusText)
 
         val legend = TextView(this).apply {
-
             text = "زیر۲ / ۲-۴ / ۴-۶ / ۶-۱۰ / بالای۱۰"
-
             textSize = 9f
             setTextColor(dim)
-
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-
-            setPadding(
-                px(2), px(3), px(2), px(4)
-            )
+            setPadding(px(2), px(3), px(2), px(4))
         }
 
         details!!.addView(legend)
 
         statsText = TextView(this).apply {
-
             textSize = 9f
             setTextColor(white)
             setTypeface(null, Typeface.BOLD)
-
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-
             setLineSpacing(px(2).toFloat(), 1f)
-
-            setPadding(
-                px(7), px(7), px(7), px(7)
-            )
+            setPadding(px(7), px(7), px(7), px(7))
 
             background = GradientDrawable().apply {
                 setColor(Color.rgb(39, 46, 59))
@@ -359,89 +299,58 @@ class CaptureService : Service() {
         details!!.addView(statsText)
 
         val disclaimer = TextView(this).apply {
-
             text = "برآورد آماری؛ بدون تضمین نتیجه"
-
             textSize = 9f
             setTextColor(dim)
-
             gravity = Gravity.RIGHT
             textDirection = View.TEXT_DIRECTION_RTL
-
-            setPadding(
-                0, px(6), 0, px(3)
-            )
+            setPadding(0, px(6), 0, px(3))
         }
 
         details!!.addView(disclaimer)
-
         panel.addView(details)
 
-        // INSTAGRAM: Always visible.
-
         val instagram = TextView(this).apply {
-
             text = "◎  @2farzam2"
-
             textSize = 11f
             setTextColor(gold)
             setTypeface(null, Typeface.BOLD)
-
             gravity = Gravity.CENTER
-
-            setPadding(
-                0, px(7), 0, px(2)
-            )
+            setPadding(0, px(7), 0, px(2))
         }
 
         panel.addView(instagram)
 
-        val displayWidth =
-            resources.displayMetrics.widthPixels
+        val displayWidth = resources.displayMetrics.widthPixels
 
-        val expandedWidth = minOf(
+        val panelWidth = minOf(
             px(245),
             displayWidth - px(20)
         )
 
         val params = WindowManager.LayoutParams(
-
-            expandedWidth,
-
+            panelWidth,
             WindowManager.LayoutParams.WRAP_CONTENT,
-
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-
             PixelFormat.TRANSLUCENT
-
         ).apply {
-
             gravity = Gravity.TOP or Gravity.START
-
-            x = (
-                displayWidth - expandedWidth - px(10)
-            ).coerceAtLeast(0)
-
+            x = (displayWidth - panelWidth - px(10)).coerceAtLeast(0)
             y = px(70)
         }
 
         overlayParams = params
 
-        // DRAG USING HEADER.
-        // Returning true on DOWN is necessary to receive MOVE events.
-
+        // Drag the panel from its header.
         header.setOnTouchListener(
             object : View.OnTouchListener {
 
                 private var startX = 0
                 private var startY = 0
-
                 private var touchX = 0f
                 private var touchY = 0f
-
                 private var moved = false
 
                 override fun onTouch(
@@ -452,20 +361,15 @@ class CaptureService : Service() {
                     return when (event.action) {
 
                         MotionEvent.ACTION_DOWN -> {
-
                             startX = params.x
                             startY = params.y
-
                             touchX = event.rawX
                             touchY = event.rawY
-
                             moved = false
-
                             true
                         }
 
                         MotionEvent.ACTION_MOVE -> {
-
                             val dx = event.rawX - touchX
                             val dy = event.rawY - touchY
 
@@ -477,7 +381,6 @@ class CaptureService : Service() {
                             }
 
                             if (moved) {
-
                                 val maxX = (
                                     displayWidth - params.width
                                 ).coerceAtLeast(0)
@@ -487,24 +390,19 @@ class CaptureService : Service() {
                                         px(80)
                                 ).coerceAtLeast(0)
 
-                                params.x = (
-                                    startX + dx
-                                ).toInt().coerceIn(0, maxX)
+                                params.x = (startX + dx)
+                                    .toInt().coerceIn(0, maxX)
 
-                                params.y = (
-                                    startY + dy
-                                ).toInt().coerceIn(0, maxY)
+                                params.y = (startY + dy)
+                                    .toInt().coerceIn(0, maxY)
 
                                 updateOverlay()
                             }
-
                             true
                         }
 
                         MotionEvent.ACTION_UP -> true
-
                         MotionEvent.ACTION_CANCEL -> true
-
                         else -> false
                     }
                 }
@@ -512,24 +410,17 @@ class CaptureService : Service() {
         )
 
         wm.addView(panel, params)
-
         overlay = panel
 
         render()
     }
 
-    private fun buttonBackground(
-        dp: Float
-    ): GradientDrawable {
-
+    private fun buttonBackground(dp: Float): GradientDrawable {
         return GradientDrawable().apply {
-
             setColor(Color.rgb(48, 54, 65))
-
             cornerRadius = 8 * dp
-
             setStroke(
-                (dp).toInt().coerceAtLeast(1),
+                dp.toInt().coerceAtLeast(1),
                 Color.rgb(115, 87, 39)
             )
         }
@@ -539,20 +430,14 @@ class CaptureService : Service() {
 
         val currentDetails = details ?: return
         val button = collapseButton ?: return
-        val params = overlayParams ?: return
-
         val panel = overlay ?: return
+        val params = overlayParams ?: return
 
         isCompact = !isCompact
 
         currentDetails.visibility =
-            if (isCompact) {
-                View.GONE
-            } else {
-                View.VISIBLE
-            }
+            if (isCompact) View.GONE else View.VISIBLE
 
-        // Minus when expanded, plus when compact.
         button.text = if (isCompact) "+" else "−"
 
         val dp = resources.displayMetrics.density
@@ -571,24 +456,16 @@ class CaptureService : Service() {
         params.x = params.x.coerceAtLeast(0)
 
         try {
-            windowManager?.updateViewLayout(
-                panel,
-                params
-            )
+            windowManager?.updateViewLayout(panel, params)
         } catch (_: Exception) {
         }
     }
 
     private fun updateOverlay() {
-
         try {
             val panel = overlay ?: return
             val params = overlayParams ?: return
-
-            windowManager?.updateViewLayout(
-                panel,
-                params
-            )
+            windowManager?.updateViewLayout(panel, params)
         } catch (_: Exception) {
         }
     }
@@ -597,32 +474,19 @@ class CaptureService : Service() {
     // SCREEN CAPTURE
     // --------------------------------------------------
 
-    private fun begin(
-        code: Int,
-        data: Intent
-    ) {
+    private fun begin(code: Int, data: Intent) {
 
-        val mgr = getSystemService(
-            MEDIA_PROJECTION_SERVICE
-        ) as MediaProjectionManager
+        val mgr = getSystemService(MEDIA_PROJECTION_SERVICE)
+            as MediaProjectionManager
 
         val mp = mgr.getMediaProjection(code, data)
-
         projection = mp
 
-        mp.registerCallback(
-            projectionCallback,
-            ui
-        )
+        mp.registerCallback(projectionCallback, ui)
 
         val dm = resources.displayMetrics
 
-        worker = HandlerThread(
-            "ocr-worker"
-        ).also {
-            it.start()
-        }
-
+        worker = HandlerThread("ocr-worker").also { it.start() }
         handler = Handler(worker!!.looper)
 
         reader = ImageReader.newInstance(
@@ -634,7 +498,6 @@ class CaptureService : Service() {
 
         reader!!.setOnImageAvailableListener(
             { r ->
-
                 val image = r.acquireLatestImage()
                     ?: return@setOnImageAvailableListener
 
@@ -649,9 +512,7 @@ class CaptureService : Service() {
                 }
 
                 lastAt = now
-
                 recognize(image)
-
             },
             handler
         )
@@ -681,11 +542,8 @@ class CaptureService : Service() {
         var ocrBitmap: Bitmap? = null
 
         try {
-
             val plane = image.planes[0]
-
-            val paddedWidth =
-                plane.rowStride / plane.pixelStride
+            val paddedWidth = plane.rowStride / plane.pixelStride
 
             val padded = Bitmap.createBitmap(
                 paddedWidth,
@@ -693,9 +551,7 @@ class CaptureService : Service() {
                 Bitmap.Config.ARGB_8888
             )
 
-            padded.copyPixelsFromBuffer(
-                plane.buffer
-            )
+            padded.copyPixelsFromBuffer(plane.buffer)
 
             fullBitmap = Bitmap.createBitmap(
                 padded,
@@ -706,45 +562,24 @@ class CaptureService : Service() {
             )
 
             padded.recycle()
-
             image.close()
 
             val source = fullBitmap
-                ?: throw IllegalStateException(
-                    "صفحه قابل خواندن نیست"
-                )
+                ?: throw IllegalStateException("صفحه قابل خواندن نیست")
 
-            // Improved crop:
-            // Include the top of the history table.
-            // The previous 64% crop missed several visible rows.
+            // Keep the existing capture region to protect the
+            // current layout calibration until OCR is tested.
+            val left = (source.width * 0.10f)
+                .toInt().coerceIn(0, source.width - 1)
 
-            val left = (
-                source.width * 0.08f
-            ).toInt().coerceIn(
-                0,
-                source.width - 1
-            )
+            val right = (source.width * 0.235f)
+                .toInt().coerceIn(left + 1, source.width)
 
-            val right = (
-                source.width * 0.28f
-            ).toInt().coerceIn(
-                left + 1,
-                source.width
-            )
+            val top = (source.height * 0.64f)
+                .toInt().coerceIn(0, source.height - 1)
 
-            val top = (
-                source.height * 0.49f
-            ).toInt().coerceIn(
-                0,
-                source.height - 1
-            )
-
-            val bottom = (
-                source.height * 0.995f
-            ).toInt().coerceIn(
-                top + 1,
-                source.height
-            )
+            val bottom = (source.height * 0.995f)
+                .toInt().coerceIn(top + 1, source.height)
 
             val cropped = Bitmap.createBitmap(
                 source,
@@ -760,14 +595,10 @@ class CaptureService : Service() {
             fullBitmap = null
 
             val prepared = prepareForOcr(cropped)
-
             ocrBitmap = prepared
 
             recognizer.process(
-                InputImage.fromBitmap(
-                    prepared,
-                    0
-                )
+                InputImage.fromBitmap(prepared, 0)
             )
                 .addOnSuccessListener { result ->
 
@@ -782,9 +613,7 @@ class CaptureService : Service() {
                             val box = line.boundingBox
                                 ?: return@mapNotNull null
 
-                            val matcher = number.matcher(
-                                line.text
-                            )
+                            val matcher = number.matcher(line.text)
 
                             if (!matcher.find()) {
                                 return@mapNotNull null
@@ -804,77 +633,42 @@ class CaptureService : Service() {
                             }
                         }
                         .sortedBy { it.first }
-
-                        // Remove duplicate OCR lines
-                        // with almost identical vertical positions.
-
-                        .distinctBy {
-                            it.first / 18
-                        }
+                        .distinctBy { it.first / 18 }
                         .take(MAX_VISIBLE_ROWS)
 
-                    observe(
-                        rows.map { it.second }
-                    )
+                    observe(rows.map { it.second })
                 }
                 .addOnFailureListener {
-
                     if (generation == sessionGeneration) {
-
                         statusMessage =
                             "خطای تشخیص متن؛ تاریخچه را واضح نگه دارید."
-
                         render()
                     }
                 }
                 .addOnCompleteListener {
-
-                    try {
-                        prepared.recycle()
-                    } catch (_: Exception) {
-                    }
-
-                    try {
-                        cropped.recycle()
-                    } catch (_: Exception) {
-                    }
+                    try { prepared.recycle() } catch (_: Exception) {}
+                    try { cropped.recycle() } catch (_: Exception) {}
 
                     if (generation == sessionGeneration) {
                         processing.set(false)
                     }
                 }
 
-        } catch (_: Exception) {
-
-            try {
-                image.close()
-            } catch (_: Exception) {
-            }
-
-            try {
-                fullBitmap?.recycle()
-            } catch (_: Exception) {
-            }
-
-            try {
-                ocrBitmap?.recycle()
-            } catch (_: Exception) {
-            }
-
-            try {
-                cropBitmap?.recycle()
-            } catch (_: Exception) {
-            }
+        } catch (e: Exception) {
+            try { image.close() } catch (_: Exception) {}
+            try { fullBitmap?.recycle() } catch (_: Exception) {}
+            try { ocrBitmap?.recycle() } catch (_: Exception) {}
+            try { cropBitmap?.recycle() } catch (_: Exception) {}
 
             if (generation == sessionGeneration) {
                 processing.set(false)
+                statusMessage = "خطا در پردازش تصویر"
+                render()
             }
         }
     }
 
-    private fun prepareForOcr(
-        source: Bitmap
-    ): Bitmap {
+    private fun prepareForOcr(source: Bitmap): Bitmap {
 
         val scaled = Bitmap.createScaledBitmap(
             source,
@@ -885,23 +679,11 @@ class CaptureService : Service() {
 
         val width = scaled.width
         val height = scaled.height
+        val pixels = IntArray(width * height)
 
-        val pixels = IntArray(
-            width * height
-        )
-
-        scaled.getPixels(
-            pixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
 
         for (i in pixels.indices) {
-
             val color = pixels[i]
 
             val gray = (
@@ -914,17 +696,8 @@ class CaptureService : Service() {
                 (gray - 128) * 1.6f + 128f
             ).toInt().coerceIn(0, 255)
 
-            val value = if (contrast < 215) {
-                0
-            } else {
-                255
-            }
-
-            pixels[i] = Color.rgb(
-                value,
-                value,
-                value
-            )
+            val value = if (contrast < 215) 0 else 255
+            pixels[i] = Color.rgb(value, value, value)
         }
 
         val output = Bitmap.createBitmap(
@@ -933,16 +706,7 @@ class CaptureService : Service() {
             Bitmap.Config.ARGB_8888
         )
 
-        output.setPixels(
-            pixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
+        output.setPixels(pixels, 0, width, 0, 0, width, height)
         scaled.recycle()
 
         return output
@@ -953,38 +717,16 @@ class CaptureService : Service() {
     // --------------------------------------------------
 
     private fun loadEvaluationStats() {
-
-        val prefs = getSharedPreferences(
-            PREFS,
-            MODE_PRIVATE
-        )
-
-        evaluatedRounds = prefs.getInt(
-            "evaluated",
-            0
-        )
-
-        successfulRanges = prefs.getInt(
-            "successful",
-            0
-        )
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        evaluatedRounds = prefs.getInt("evaluated", 0)
+        successfulRanges = prefs.getInt("successful", 0)
     }
 
     private fun saveEvaluationStats() {
-
-        getSharedPreferences(
-            PREFS,
-            MODE_PRIVATE
-        )
+        getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit()
-            .putInt(
-                "evaluated",
-                evaluatedRounds
-            )
-            .putInt(
-                "successful",
-                successfulRanges
-            )
+            .putInt("evaluated", evaluatedRounds)
+            .putInt("successful", successfulRanges)
             .apply()
     }
 
@@ -994,7 +736,6 @@ class CaptureService : Service() {
 
         history.clear()
         previousVisible = emptyList()
-
         forecasts = emptyList()
 
         completedForecastRounds = 0
@@ -1005,8 +746,7 @@ class CaptureService : Service() {
 
         lastAt = 0L
         processing.set(false)
-
-        // Evaluation history is intentionally preserved.
+        modelReport = emptyMap()
 
         statusMessage =
             "جلسه جدید؛ در انتظار خواندن تاریخچه..."
@@ -1018,50 +758,28 @@ class CaptureService : Service() {
 
     private fun stopCaptureResources() {
 
-        reader?.setOnImageAvailableListener(
-            null,
-            null
-        )
+        reader?.setOnImageAvailableListener(null, null)
 
-        try {
-            display?.release()
-        } catch (_: Exception) {
-        }
-
+        try { display?.release() } catch (_: Exception) {}
         display = null
 
-        try {
-            reader?.close()
-        } catch (_: Exception) {
-        }
-
+        try { reader?.close() } catch (_: Exception) {}
         reader = null
 
         try {
-            projection?.unregisterCallback(
-                projectionCallback
-            )
-        } catch (_: Exception) {
-        }
+            projection?.unregisterCallback(projectionCallback)
+        } catch (_: Exception) {}
 
-        try {
-            projection?.stop()
-        } catch (_: Exception) {
-        }
-
+        try { projection?.stop() } catch (_: Exception) {}
         projection = null
 
         worker?.quitSafely()
-
         worker = null
         handler = null
 
         try {
-            overlay?.let {
-                windowManager?.removeView(it)
-            }
-        } catch (_: Exception) {
-        }
+            overlay?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) {}
 
         overlay = null
         overlayParams = null
@@ -1083,21 +801,15 @@ class CaptureService : Service() {
         val length: Int
     )
 
-    private fun sameValue(
-        first: Double,
-        second: Double
-    ): Boolean {
-        return abs(first - second) < 0.005
+    private fun sameValue(a: Double, b: Double): Boolean {
+        return abs(a - b) < 0.005
     }
 
     private fun sameHistory(
         first: List<Double>,
         second: List<Double>
     ): Boolean {
-
-        if (first.size != second.size) {
-            return false
-        }
+        if (first.size != second.size) return false
 
         return first.indices.all {
             sameValue(first[it], second[it])
@@ -1109,15 +821,11 @@ class CaptureService : Service() {
         current: List<Double>
     ): OverlapMatch? {
 
-        if (
-            previous.isEmpty() ||
-            current.isEmpty()
-        ) {
+        if (previous.isEmpty() || current.isEmpty()) {
             return null
         }
 
         if (sameHistory(previous, current)) {
-
             return OverlapMatch(
                 0,
                 minOf(previous.size, current.size)
@@ -1134,11 +842,7 @@ class CaptureService : Service() {
         for (newCount in 0..maxNew) {
 
             val available = current.size - newCount
-
-            val limit = minOf(
-                previous.size,
-                available
-            )
+            val limit = minOf(previous.size, available)
 
             var length = 0
 
@@ -1154,19 +858,11 @@ class CaptureService : Service() {
 
             val required = minOf(
                 3,
-                minOf(
-                    previous.size,
-                    available
-                )
+                minOf(previous.size, available)
             )
 
             if (length >= required) {
-
-                val candidate = OverlapMatch(
-                    newCount,
-                    length
-                )
-
+                val candidate = OverlapMatch(newCount, length)
                 val oldBest = best
 
                 if (
@@ -1189,31 +885,21 @@ class CaptureService : Service() {
     // FORECAST AND EVALUATION
     // --------------------------------------------------
 
-    private fun rangeIndex(
-        range: String
-    ): Int {
-
-        return when (range) {
-            "0 تا 2" -> 0
-            "2 تا 4" -> 1
-            "4 تا 6" -> 2
-            "6 تا 10" -> 3
-            "10 به بالا" -> 4
-            else -> -1
-        }
+    private fun bucket(value: Double): Int = when {
+        value < 2.0 -> 0
+        value < 4.0 -> 1
+        value < 6.0 -> 2
+        value < 10.0 -> 3
+        else -> 4
     }
 
-    private fun bucket(
-        value: Double
-    ): Int {
-
-        return when {
-            value < 2.0 -> 0
-            value < 4.0 -> 1
-            value < 6.0 -> 2
-            value < 10.0 -> 3
-            else -> 4
-        }
+    private fun rangeIndex(range: String): Int = when (range) {
+        "0 تا 2" -> 0
+        "2 تا 4" -> 1
+        "4 تا 6" -> 2
+        "6 تا 10" -> 3
+        "10 به بالا" -> 4
+        else -> -1
     }
 
     private fun evaluateForecast(
@@ -1221,10 +907,7 @@ class CaptureService : Service() {
         actual: Double
     ) {
 
-        val predicted = rangeIndex(
-            forecast.range
-        )
-
+        val predicted = rangeIndex(forecast.range)
         val observed = bucket(actual)
 
         if (predicted < 0) return
@@ -1240,42 +923,32 @@ class CaptureService : Service() {
 
     private fun startForecastCycle() {
 
-        val result = PredictionEngine.forecast(
-            history.toList()
-        )
+        val result = PredictionEngine.forecast(history.toList())
 
         if (result.size != FORECAST_SIZE) {
-
             forecasts = emptyList()
             forecastActive = false
-
             completedForecastRounds = 0
-
             modelReport = emptyMap()
-
             return
         }
 
         forecasts = result
-
         completedForecastRounds = 0
         forecastActive = true
 
         modelReport =
-            PredictionEngine.modelWeightReport(
-                history.toList()
-            )
+            PredictionEngine.modelWeightReport(history.toList())
     }
 
-    private fun registerNewRound(
-        value: Double
-    ) {
+    private fun registerNewRound(value: Double) {
 
+        // Evaluate the forecast for this round before adding
+        // its actual result to the historical training data.
         if (
             forecastActive &&
             completedForecastRounds < forecasts.size
         ) {
-
             evaluateForecast(
                 forecasts[completedForecastRounds],
                 value
@@ -1292,18 +965,13 @@ class CaptureService : Service() {
 
         totalNewRounds++
 
-        if (
-            !forecastActive &&
-            history.size >= 10
-        ) {
-
+        if (!forecastActive && history.size >= 10) {
             startForecastCycle()
             return
         }
 
-        if (!forecastActive) return
-
         if (
+            forecastActive &&
             completedForecastRounds >= FORECAST_SIZE
         ) {
             startForecastCycle()
@@ -1314,32 +982,23 @@ class CaptureService : Service() {
     // OBSERVE NEW RESULTS
     // --------------------------------------------------
 
-    private fun observe(
-        visible: List<Double>
-    ) {
+    private fun observe(visible: List<Double>) {
 
         if (visible.isEmpty()) {
-
             statusMessage =
                 "ستون انفجار پیدا نشد؛ تاریخچه را واضح نگه دارید."
-
             render()
             return
         }
 
-        // INITIAL HISTORY:
-        // Seed the engine with all currently visible rows.
-        // Website order is newest -> oldest.
-        // Internal order must be oldest -> newest.
-
+        // Initial baseline. Existing visible results are used
+        // as historical data, not counted as new session rounds.
         if (previousVisible.isEmpty()) {
 
             previousVisible = visible.toList()
 
-            val initialHistory = visible.asReversed()
-
             history.clear()
-            history.addAll(initialHistory)
+            history.addAll(visible.asReversed())
 
             while (history.size > MAX_SAVED) {
                 history.removeAt(0)
@@ -1348,7 +1007,7 @@ class CaptureService : Service() {
             noOverlapCount = 0
 
             statusMessage =
-                "${history.size} ضریب اولیه خوانده شد."
+                "${history.size} ضریب اولیه شناسایی شد."
 
             if (history.size >= 10) {
                 startForecastCycle()
@@ -1359,37 +1018,25 @@ class CaptureService : Service() {
         }
 
         if (sameHistory(visible, previousVisible)) {
-
-            statusMessage =
-                "اسکن انجام شد؛ نتیجه جدیدی ثبت نشد."
-
+            statusMessage = "اسکن انجام شد؛ نتیجه جدیدی ثبت نشد."
             render()
             return
         }
 
-        val overlap = findHeadOverlap(
-            previousVisible,
-            visible
-        )
+        val overlap = findHeadOverlap(previousVisible, visible)
 
         if (
             overlap == null ||
             overlap.visibleIndex > MAX_NEW_PER_SCAN
         ) {
-
             noOverlapCount++
 
             if (noOverlapCount >= 3) {
-
                 previousVisible = visible.toList()
-
                 noOverlapCount = 0
-
                 statusMessage =
-                    "مبنای تاریخچه تازه شد؛ تطبیق مجدد در حال انجام است."
-
+                    "مبنای تاریخچه تازه شد؛ داده جدید ثبت نشد."
             } else {
-
                 statusMessage =
                     "در انتظار تطبیق ردیف‌های مشترک..."
             }
@@ -1403,13 +1050,11 @@ class CaptureService : Service() {
         val newCount = overlap.visibleIndex
 
         if (newCount > 0) {
-
             val newValues = visible
                 .take(newCount)
                 .asReversed()
 
             newValues.forEach { value ->
-
                 registerNewRound(value)
             }
         }
@@ -1417,11 +1062,8 @@ class CaptureService : Service() {
         previousVisible = visible.toList()
 
         statusMessage = if (newCount > 0) {
-
             "$newCount نتیجه جدید ثبت شد."
-
         } else {
-
             "تاریخچه به‌روزرسانی شد؛ نتیجه جدیدی ثبت نشد."
         }
 
@@ -1435,20 +1077,14 @@ class CaptureService : Service() {
     private fun render() {
 
         val cycleText = if (forecastActive) {
-
             "$completedForecastRounds از 5"
-
         } else {
-
             "در انتظار تکمیل 10 نمونه"
         }
 
         val accuracy = if (evaluatedRounds > 0) {
-
             successfulRanges * 100 / evaluatedRounds
-
         } else {
-
             0
         }
 
@@ -1469,12 +1105,9 @@ class CaptureService : Service() {
                 .take(FORECAST_SIZE)
                 .mapIndexed { index, forecast ->
 
-                    val mark =
-                        if (index < completedForecastRounds) {
-                            "✓"
-                        } else {
-                            "○"
-                        }
+                    val mark = if (
+                        index < completedForecastRounds
+                    ) "✓" else "○"
 
                     val distribution =
                         forecast.probabilities.joinToString("  •  ")
@@ -1487,11 +1120,8 @@ class CaptureService : Service() {
                 .joinToString("\n\n")
 
             val weightsText = if (modelReport.isEmpty()) {
-
                 ""
-
             } else {
-
                 "\n\nوزن موتورهای تحلیل:\n" +
                     modelReport.entries.joinToString(" | ") {
                         "${it.key}: ${it.value}٪"
@@ -1502,7 +1132,6 @@ class CaptureService : Service() {
         }
 
         ui.post {
-
             statusText?.text =
                 "$counterText\n$statusMessage"
 
@@ -1538,13 +1167,10 @@ class CaptureService : Service() {
         sessionGeneration++
 
         stopCaptureResources()
-
         recognizer.close()
 
         super.onDestroy()
     }
 
-    override fun onBind(
-        intent: Intent?
-    ): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? = null
 }
