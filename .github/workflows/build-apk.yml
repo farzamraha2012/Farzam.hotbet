@@ -1,14 +1,12 @@
+
 name: Build HotBetAnalyzer APK
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - New_branch
-      - main
-      - master
-      - v0.8-test
-      - v0.9-test
 
 permissions:
   contents: read
@@ -30,21 +28,19 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
-      - name: Install Android SDK
+      - name: Install Android SDK platform
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: wrapper
 
       - name: Check project files
         run: |
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
+          test -f gradlew
           test -f gradle/wrapper/gradle-wrapper.properties
 
       - name: Build APK
@@ -56,7 +52,6 @@ jobs:
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
           test -s "$APK"
-
           unzip -t "$APK"
 
           "$ANDROID_HOME/build-tools/35.0.0/aapt" \
