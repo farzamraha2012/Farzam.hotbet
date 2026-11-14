@@ -35,16 +35,19 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
       - name: Check project files
         run: |
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
-          test -f gradlew
-          test -f gradle/wrapper/gradle-wrapper.properties
 
       - name: Build APK
         run: |
-          bash ./gradlew --no-daemon clean assembleDebug
+          gradle --no-daemon clean assembleDebug
 
       - name: Verify APK
         run: |
