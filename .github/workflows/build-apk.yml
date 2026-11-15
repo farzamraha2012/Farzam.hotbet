@@ -67,15 +67,9 @@ jobs:
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
-
-          test -f app/src/main/java/com/example/hotbetanalyzer/MainActivity.kt
-          test -f app/src/main/java/com/example/hotbetanalyzer/CaptureService.kt
-          test -f app/src/main/java/com/example/hotbetanalyzer/PredictionEngine.kt
-
-          test -f app/src/main/java/com/example/hotbetanalyzer/GameDatabase.kt
-          test -f app/src/main/java/com/example/hotbetanalyzer/GameDao.kt
-          test -f app/src/main/java/com/example/hotbetanalyzer/GameSession.kt
-          test -f app/src/main/java/com/example/hotbetanalyzer/GameResult.kt
+          test -f app/src/main/java/com/hotbet/analyzer/MainActivity.kt
+          test -f app/src/main/java/com/hotbet/analyzer/CaptureService.kt
+          test -f app/src/main/java/com/hotbet/analyzer/PredictionEngine.kt
 
       - name: Build APK v0.9.5
         run: |
