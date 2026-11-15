@@ -199,7 +199,7 @@ class CaptureService : Service() {
         val notification =
             Notification.Builder(this, CHANNEL)
                 .setContentTitle(
-                    "HOTBET • Phoenix Analyzer"
+                    "HOTBET • Phoenix Analyzer • نسخه ۰٫۹٫۵"
                 )
                 .setContentText(
                     "در حال تحلیل تاریخچه ضرایب"
@@ -470,7 +470,7 @@ class CaptureService : Service() {
 
         val title = TextView(this).apply {
 
-            text = "🔥 HOTBET • PHOENIX"
+            text = "🔥 HOTBET • PHOENIX • نسخه ۰٫۹٫۵"
 
             textSize = 12f
 
