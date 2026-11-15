@@ -1,4 +1,5 @@
-name: Build HotBetAnalyzer APK
+name: Build HotBetAnalyzer v0.9.4
+
 on:
   workflow_dispatch:
 
@@ -34,6 +35,28 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Restore stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: hotbet-debug-signing-key-v1
+
+      - name: Create stable debug signing key if missing
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -noprompt
+          fi
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -43,8 +66,10 @@ jobs:
         run: |
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
+          test -f app/src/main/java/com/hotbet/analyzer/CaptureService.kt
+          test -f app/src/main/java/com/hotbet/analyzer/PredictionEngine.kt
 
-      - name: Build APK
+      - name: Build APK v0.9.4
         run: |
           gradle --no-daemon clean assembleDebug
 
@@ -61,10 +86,10 @@ jobs:
           mkdir -p release
 
           cp "$APK" \
-            release/HotBetAnalyzer-NewBranch-debug.apk
+            release/HotBetAnalyzer-v0.9.4-S23Ultra-debug.apk
 
           sha256sum \
-            release/HotBetAnalyzer-NewBranch-debug.apk \
+            release/HotBetAnalyzer-v0.9.4-S23Ultra-debug.apk \
             > release/SHA256SUMS.txt
 
           ls -lh release/
@@ -72,7 +97,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-NewBranch-APK
+          name: HotBetAnalyzer-v0.9.4-NewBranch-APK
           path: release/*
           if-no-files-found: error
           retention-days: 30
