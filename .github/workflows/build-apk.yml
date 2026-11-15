@@ -1,4 +1,4 @@
-name: Build HotBetAnalyzer v0.9.4
+name: Build HotBetAnalyzer v0.9.5
 
 on:
   workflow_dispatch:
@@ -66,10 +66,18 @@ jobs:
         run: |
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
-          test -f app/src/main/java/com/hotbet/analyzer/CaptureService.kt
-          test -f app/src/main/java/com/hotbet/analyzer/PredictionEngine.kt
+          test -f app/src/main/AndroidManifest.xml
 
-      - name: Build APK v0.9.4
+          test -f app/src/main/java/com/example/hotbetanalyzer/MainActivity.kt
+          test -f app/src/main/java/com/example/hotbetanalyzer/CaptureService.kt
+          test -f app/src/main/java/com/example/hotbetanalyzer/PredictionEngine.kt
+
+          test -f app/src/main/java/com/example/hotbetanalyzer/GameDatabase.kt
+          test -f app/src/main/java/com/example/hotbetanalyzer/GameDao.kt
+          test -f app/src/main/java/com/example/hotbetanalyzer/GameSession.kt
+          test -f app/src/main/java/com/example/hotbetanalyzer/GameResult.kt
+
+      - name: Build APK v0.9.5
         run: |
           gradle --no-daemon clean assembleDebug
 
@@ -86,10 +94,10 @@ jobs:
           mkdir -p release
 
           cp "$APK" \
-            release/HotBetAnalyzer-v0.9.4-S23Ultra-debug.apk
+            release/HotBetAnalyzer-v0.9.5-S23Ultra-debug.apk
 
           sha256sum \
-            release/HotBetAnalyzer-v0.9.4-S23Ultra-debug.apk \
+            release/HotBetAnalyzer-v0.9.5-S23Ultra-debug.apk \
             > release/SHA256SUMS.txt
 
           ls -lh release/
@@ -97,7 +105,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HotBetAnalyzer-v0.9.4-NewBranch-APK
+          name: HotBetAnalyzer-v0.9.5-NewBranch-APK
           path: release/*
           if-no-files-found: error
           retention-days: 30
