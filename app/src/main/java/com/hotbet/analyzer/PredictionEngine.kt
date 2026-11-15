@@ -1,5 +1,6 @@
 package com.example.hotbetanalyzer
 
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
@@ -8,9 +9,11 @@ import kotlin.math.min
 object PredictionEngine {
 
     const val MIN_HISTORY = 10
-
     const val BUCKET_COUNT = 5
     const val MODEL_COUNT = 5
+
+    private const val MAX_BACKTEST_ORIGINS = 160
+    private const val MAX_TRAINING_HISTORY = 2500
 
     val rangeNames = listOf(
         "0 تا 2",
@@ -50,8 +53,10 @@ object PredictionEngine {
     private fun normalize(values: DoubleArray): DoubleArray {
 
         val safe = DoubleArray(BUCKET_COUNT) {
-            if (values[it].isFinite()) {
-                max(0.000001, values[it])
+            val value = values[it]
+
+            if (value.isFinite() && value > 0.0) {
+                value
             } else {
                 0.000001
             }
@@ -69,7 +74,13 @@ object PredictionEngine {
     ): DoubleArray {
 
         val safe = DoubleArray(MODEL_COUNT) {
-            max(0.000001, values[it])
+            val value = values[it]
+
+            if (value.isFinite() && value > 0.0) {
+                value
+            } else {
+                0.000001
+            }
         }
 
         val total = safe.sum()
@@ -79,7 +90,7 @@ object PredictionEngine {
         }
     }
 
-    // MODEL 1: Overall historical frequency.
+    // MODEL 1: Overall frequency
 
     private fun frequencyModel(
         data: List<Double>
@@ -89,14 +100,14 @@ object PredictionEngine {
             1.0
         }
 
-        data.forEach { value ->
-            counts[bucketIndex(value)] += 1.0
+        data.forEach {
+            counts[bucketIndex(it)] += 1.0
         }
 
         return normalize(counts)
     }
 
-    // MODEL 2: Recency-weighted frequency.
+    // MODEL 2: Time-decay frequency
 
     private fun recencyModel(
         data: List<Double>
@@ -125,7 +136,7 @@ object PredictionEngine {
         return normalize(counts)
     }
 
-    // MODEL 3: Short-term trend.
+    // MODEL 3: Short-term trend
 
     private fun shortTermModel(
         data: List<Double>
@@ -154,7 +165,7 @@ object PredictionEngine {
         return normalize(counts)
     }
 
-    // MODEL 4: One-step transition analysis.
+    // MODEL 4: Transition analysis
 
     private fun transitionModel(
         data: List<Double>
@@ -183,7 +194,7 @@ object PredictionEngine {
         return normalize(counts)
     }
 
-    // MODEL 5: Two-step sequence matching.
+    // MODEL 5: Two-step sequence analysis
 
     private fun sequenceModel(
         data: List<Double>
@@ -203,9 +214,7 @@ object PredictionEngine {
             data[data.lastIndex - 1]
         )
 
-        val current = bucketIndex(
-            data.last()
-        )
+        val current = bucketIndex(data.last())
 
         for (i in 2 until data.size) {
 
@@ -239,9 +248,8 @@ object PredictionEngine {
         )
     }
 
-    // Walk-forward learning.
-    // Each historical prediction is evaluated without
-    // using the result that it is trying to predict.
+    // WALK-FORWARD ADAPTIVE LEARNING
+    // Historical outcomes are never used to predict themselves.
 
     private fun adaptiveWeights(
         data: List<Double>
@@ -258,12 +266,26 @@ object PredictionEngine {
         val losses = DoubleArray(MODEL_COUNT)
         val tests = IntArray(MODEL_COUNT)
 
-        for (origin in MIN_HISTORY until data.size) {
+        val firstOrigin = max(
+            MIN_HISTORY,
+            data.size - MAX_BACKTEST_ORIGINS
+        )
+
+        for (origin in firstOrigin until data.size) {
+
+            val trainingStart = max(
+                0,
+                origin - MAX_TRAINING_HISTORY
+            )
 
             val training = data.subList(
-                0,
+                trainingStart,
                 origin
             )
+
+            if (training.size < MIN_HISTORY) {
+                continue
+            }
 
             val actual = bucketIndex(
                 data[origin]
@@ -286,7 +308,9 @@ object PredictionEngine {
             }
         }
 
-        if (tests[0] == 0) {
+        val testCount = tests.minOrNull() ?: 0
+
+        if (testCount == 0) {
             return equalWeights
         }
 
@@ -302,14 +326,14 @@ object PredictionEngine {
 
         val learned = normalizeWeights(scores)
 
-        // Gradually trust learned weights as more
-        // historical tests become available.
+        // More historical tests = more confidence in learned weights.
 
         val confidence =
-            tests[0].toDouble() /
-            (tests[0] + 20.0)
+            testCount.toDouble() /
+            (testCount + 20.0)
 
         val blended = DoubleArray(MODEL_COUNT) {
+
             learned[it] * confidence +
                 equalWeights[it] * (1.0 - confidence)
         }
@@ -317,7 +341,7 @@ object PredictionEngine {
         return normalizeWeights(blended)
     }
 
-    // Combine the five independent statistical engines.
+    // COMBINED ENSEMBLE
 
     private fun combinedForecast(
         data: List<Double>,
@@ -341,8 +365,7 @@ object PredictionEngine {
         return normalize(combined)
     }
 
-    // Convert probabilities to integer percentages
-    // while ensuring their total is exactly 100.
+    // Convert probabilities to percentages totaling exactly 100.
 
     private fun toPercentages(
         probabilities: DoubleArray
@@ -352,13 +375,13 @@ object PredictionEngine {
             (it * 100.0).toInt()
         }.toMutableList()
 
-        val remainders =
-            probabilities.mapIndexed { index, value ->
+        val remainders = probabilities.mapIndexed {
+            index, value ->
 
-                index to (
-                    value * 100.0 - result[index]
-                )
-            }
+            index to (
+                value * 100.0 - result[index]
+            )
+        }
 
         var remaining = 100 - result.sum()
 
@@ -378,16 +401,51 @@ object PredictionEngine {
         return result
     }
 
+    // Select the best category using UNROUNDED probabilities.
+    // This prevents the first category from winning rounded ties.
+
     private fun bestIndex(
-        percentages: List<Int>
+        probabilities: DoubleArray,
+        data: List<Double>
     ): Int {
 
-        return percentages.indices.maxByOrNull {
-            percentages[it]
-        } ?: 0
+        val highest = probabilities.maxOrNull() ?: return 0
+
+        val tied = probabilities.indices.filter {
+            abs(probabilities[it] - highest) < 0.0000000001
+        }
+
+        if (tied.size == 1) {
+            return tied.first()
+        }
+
+        val counts = IntArray(BUCKET_COUNT)
+
+        data.forEach {
+            counts[bucketIndex(it)]++
+        }
+
+        val highestCount = tied.maxOf {
+            counts[it]
+        }
+
+        val mostFrequent = tied.filter {
+            counts[it] == highestCount
+        }
+
+        // Prefer the middle range if it is equally probable
+        // and equally frequent with another range.
+
+        if (2 in mostFrequent) {
+            return 2
+        }
+
+        return mostFrequent.minByOrNull {
+            abs(it - 2)
+        } ?: 2
     }
 
-    // Only ONE future round is calculated.
+    // ONLY ONE FUTURE ROUND
 
     fun forecast(
         history: List<Double>
@@ -418,7 +476,10 @@ object PredictionEngine {
             weights
         )
 
-        val best = bestIndex(percentages)
+        val best = bestIndex(
+            distribution,
+            data
+        )
 
         return Forecast(
             round = 1,
