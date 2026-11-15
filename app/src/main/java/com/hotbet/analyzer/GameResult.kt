@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "game_results",
+
     foreignKeys = [
         ForeignKey(
             entity = GameSession::class,
@@ -15,12 +16,17 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE
         )
     ],
+
     indices = [
         Index("sessionId"),
-        Index(value = ["sessionId", "sequenceNumber"], unique = true)
+        Index(
+            value = ["sessionId", "sequenceNumber"],
+            unique = true
+        )
     ]
 )
 data class GameResult(
+
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
 
