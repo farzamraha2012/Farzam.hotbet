@@ -1,4 +1,3 @@
-
 package com.example.hotbetanalyzer
 
 import androidx.room.Dao
@@ -22,13 +21,7 @@ interface GameDao {
 
     @Query(
         "SELECT * FROM game_sessions " +
-        "WHERE id IN (SELECT DISTINCT sessionId FROM game_results) " +
-        "ORDER BY startedAt ASC, id ASC"
-    )
-    suspend fun getAllSessions(): List<GameSession>
-
-    @Query(
-        "SELECT * FROM game_sessions ORDER BY startedAt DESC"
+        "ORDER BY startedAt DESC"
     )
     fun observeSessions(): Flow<List<GameSession>>
 
@@ -42,10 +35,10 @@ interface GameDao {
     ): List<GameResult>
 
     @Query(
-        "SELECT * FROM game_results " +
-        "ORDER BY recordedAt DESC, id DESC"
+        "SELECT multiplier FROM game_results " +
+        "ORDER BY id ASC"
     )
-    suspend fun getAllResults(): List<GameResult>
+    suspend fun getAllMultipliers(): List<Double>
 
     @Query(
         "SELECT * FROM game_sessions " +
@@ -79,13 +72,6 @@ interface GameDao {
         "WHERE id = :sessionId"
     )
     suspend fun refreshSessionCount(
-        sessionId: Long
-    )
-
-    @Query(
-        "DELETE FROM game_sessions WHERE id = :sessionId"
-    )
-    suspend fun deleteSession(
         sessionId: Long
     )
 }
