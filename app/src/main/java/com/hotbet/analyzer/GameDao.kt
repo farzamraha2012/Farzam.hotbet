@@ -1,11 +1,9 @@
 package com.example.hotbetanalyzer
 
-import kotlinx.coroutines.flow.Flow
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -41,7 +39,7 @@ interface GameDao {
     )
     suspend fun getAllResults(): List<GameResult>
 
-    // Load all historical multipliers in chronological order.
+    // Load all historical multipliers.
     // Oldest first, newest last.
 
     @Query(
@@ -66,7 +64,7 @@ interface GameDao {
         endedAt: Long = System.currentTimeMillis()
     )
 
-    // Close any session left active after an unexpected shutdown.
+    // Close sessions left active after unexpected shutdown.
 
     @Query(
         "UPDATE game_sessions " +
@@ -87,7 +85,7 @@ interface GameDao {
         sessionId: Long
     )
 
-    // Manual deletion only. Never called automatically.
+    // Manual deletion only.
 
     @Query(
         "DELETE FROM game_sessions WHERE id = :sessionId"
