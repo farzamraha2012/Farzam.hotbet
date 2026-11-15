@@ -32,9 +32,10 @@ abstract class GameDatabase : RoomDatabase() {
                     "hotbet_memory.db"
                 )
                     .build()
-                    .also { INSTANCE = it }
+                    .also {
+                        INSTANCE = it
+                    }
             }
         }
     }
 }
- 
