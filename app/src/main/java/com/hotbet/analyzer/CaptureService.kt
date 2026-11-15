@@ -30,6 +30,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -38,7 +39,6 @@ import java.util.regex.Pattern
 import java.util.concurrent.atomic.AtomicBoolean
 
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 
 class CaptureService : Service() {
@@ -56,12 +56,11 @@ class CaptureService : Service() {
 
         private const val PREFS = "hotbet_evaluation"
 
-        private const val OVERLAP_TOLERANCE = 0.015
+        // Values are displayed to two decimal places.
+        private const val OVERLAP_TOLERANCE = 0.005
     }
 
-    // --------------------------------------------------
     // SCREEN CAPTURE
-    // --------------------------------------------------
 
     private var projection: MediaProjection? = null
 
@@ -90,9 +89,7 @@ class CaptureService : Service() {
 
     private var noOverlapCount = 0
 
-    // --------------------------------------------------
     // DATABASE
-    // --------------------------------------------------
 
     private val serviceScope =
         CoroutineScope(
@@ -108,9 +105,7 @@ class CaptureService : Service() {
 
     private var writeTail: Job? = null
 
-    // --------------------------------------------------
     // FLOATING WINDOW
-    // --------------------------------------------------
 
     private var overlay: View? = null
 
@@ -129,14 +124,12 @@ class CaptureService : Service() {
 
     private var isCompact = false
 
-    // --------------------------------------------------
-    // HISTORY
-    // --------------------------------------------------
+    // HISTORY: OLDEST -> NEWEST
 
-    // Oldest -> newest.
     private val history = mutableListOf<Double>()
 
-    // Newest -> oldest, exactly as displayed on website.
+    // Website visual order: NEWEST -> OLDEST
+
     private var previousVisible = emptyList<Double>()
 
     private var totalNewRounds = 0
@@ -144,9 +137,7 @@ class CaptureService : Service() {
     private var currentForecast:
         PredictionEngine.Forecast? = null
 
-    // --------------------------------------------------
     // EVALUATION
-    // --------------------------------------------------
 
     private var evaluatedRounds = 0
 
@@ -169,22 +160,13 @@ class CaptureService : Service() {
             }
         }
 
-    // --------------------------------------------------
-    // CREATE
-    // --------------------------------------------------
-
     override fun onCreate() {
-
         super.onCreate()
-
         createChannel()
-
         loadEvaluationStats()
     }
 
-    // --------------------------------------------------
     // START SERVICE
-    // --------------------------------------------------
 
     override fun onStartCommand(
         intent: Intent?,
@@ -260,7 +242,6 @@ class CaptureService : Service() {
         }
 
         if (projection != null || overlay != null) {
-
             stopCaptureResources()
         }
 
@@ -271,9 +252,7 @@ class CaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    // --------------------------------------------------
-    // LOAD DATABASE BEFORE OCR
-    // --------------------------------------------------
+    // LOAD DATABASE
 
     private fun initializeStorageAndBegin(
         code: Int,
@@ -290,13 +269,16 @@ class CaptureService : Service() {
                     .getInstance(applicationContext)
                     .gameDao()
 
-                // Close any session left active by a previous run.
+                // Finish any previously active session.
+
                 dao.finishAllActiveSessions()
 
-                // Load all previously saved multipliers.
+                // Load every saved multiplier in chronological order.
+
                 val stored = dao.getAllMultipliers()
 
-                // Create a fresh session without deleting old records.
+                // Create a new session without deleting old records.
+
                 val newSessionId = dao.createSession(
                     GameSession()
                 )
@@ -360,9 +342,7 @@ class CaptureService : Service() {
         }
     }
 
-    // --------------------------------------------------
-    // PERSIST RESULTS
-    // --------------------------------------------------
+    // SAVE RESULTS
 
     private fun persistResults(
         values: List<Double>,
@@ -381,32 +361,42 @@ class CaptureService : Service() {
 
         sessionSequence += values.size
 
-        // Queue database writes in order.
         val previousWrite = writeTail
 
         writeTail = serviceScope.launch {
 
             previousWrite?.join()
 
-            values.forEachIndexed { index, multiplier ->
+            try {
 
-                dao.insertResult(
-                    GameResult(
-                        sessionId = sessionId,
-                        sequenceNumber = firstSequence + index,
-                        multiplier = multiplier,
-                        source = source
+                values.forEachIndexed { index, multiplier ->
+
+                    dao.insertResult(
+                        GameResult(
+                            sessionId = sessionId,
+                            sequenceNumber = firstSequence + index,
+                            multiplier = multiplier,
+                            source = source
+                        )
                     )
-                )
-            }
+                }
 
-            dao.refreshSessionCount(sessionId)
+                dao.refreshSessionCount(sessionId)
+
+            } catch (e: Exception) {
+
+                ui.post {
+
+                    statusMessage =
+                        "خطا در ذخیره نتیجه: ${e.message}"
+
+                    render()
+                }
+            }
         }
     }
 
-    // --------------------------------------------------
     // FLOATING WINDOW
-    // --------------------------------------------------
 
     private fun showOverlay() {
 
@@ -422,13 +412,9 @@ class CaptureService : Service() {
 
         val white = Color.WHITE
 
-        val dim = Color.rgb(
-            190, 198, 211
-        )
+        val dim = Color.rgb(190, 198, 211)
 
-        val gold = Color.rgb(
-            225, 183, 77
-        )
+        val gold = Color.rgb(225, 183, 77)
 
         val panel = LinearLayout(this).apply {
 
@@ -470,7 +456,7 @@ class CaptureService : Service() {
 
         val title = TextView(this).apply {
 
-            text = "🔥 HOTBET • PHOENIX • نسخه ۰٫۹٫۵"
+            text = "🔥 HOTBET • PHOENIX"
 
             textSize = 12f
 
@@ -550,7 +536,6 @@ class CaptureService : Service() {
         panel.addView(header)
 
         details = LinearLayout(this).apply {
-
             orientation = LinearLayout.VERTICAL
         }
 
@@ -713,8 +698,6 @@ class CaptureService : Service() {
 
         overlayParams = params
 
-        // Drag panel from its header.
-
         header.setOnTouchListener(
 
             object : View.OnTouchListener {
@@ -737,11 +720,9 @@ class CaptureService : Service() {
                         MotionEvent.ACTION_DOWN -> {
 
                             startX = params.x
-
                             startY = params.y
 
                             touchX = event.rawX
-
                             touchY = event.rawY
 
                             true
@@ -874,9 +855,7 @@ class CaptureService : Service() {
         }
     }
 
-    // --------------------------------------------------
-    // SCREEN CAPTURE
-    // --------------------------------------------------
+    // BEGIN SCREEN CAPTURE
 
     private fun begin(
         code: Int,
@@ -971,9 +950,7 @@ class CaptureService : Service() {
         )
     }
 
-    // --------------------------------------------------
     // OCR
-    // --------------------------------------------------
 
     private fun recognize(image: Image) {
 
@@ -1027,8 +1004,8 @@ class CaptureService : Service() {
                     "صفحه قابل خواندن نیست"
                 )
 
-            // Calibrated capture region for the supplied
-            // portrait HotBet mobile layout.
+            // Capture region for the supplied portrait layout.
+            // These coordinates still need real-device verification.
 
             val left = (
                 source.width * 0.10f
@@ -1077,9 +1054,7 @@ class CaptureService : Service() {
 
             fullBitmap = null
 
-            val prepared = prepareForOcr(
-                cropped
-            )
+            val prepared = prepareForOcr(cropped)
 
             ocrBitmap = prepared
 
@@ -1134,8 +1109,8 @@ class CaptureService : Service() {
                             it.first
                         }
 
-                // Remove duplicate OCR lines by vertical position.
-                // Repeated multiplier values at different rows remain valid.
+                // Remove duplicate OCR detections
+                // while preserving repeated values in separate rows.
 
                 val uniqueRows =
                     mutableListOf<Pair<Int, Double>>()
@@ -1221,9 +1196,7 @@ class CaptureService : Service() {
         }
     }
 
-    // --------------------------------------------------
     // IMAGE PREPARATION
-    // --------------------------------------------------
 
     private fun prepareForOcr(
         source: Bitmap
@@ -1249,19 +1222,12 @@ class CaptureService : Service() {
         )
 
         scaled.getPixels(
-
             pixels,
-
             0,
-
             width,
-
             0,
-
             0,
-
             width,
-
             height
         )
 
@@ -1288,9 +1254,6 @@ class CaptureService : Service() {
                 255
             )
 
-            // Preserve grayscale information instead
-            // of applying an aggressive black/white threshold.
-
             pixels[i] = Color.rgb(
                 contrast,
                 contrast,
@@ -1308,19 +1271,12 @@ class CaptureService : Service() {
         )
 
         output.setPixels(
-
             pixels,
-
             0,
-
             width,
-
             0,
-
             0,
-
             width,
-
             height
         )
 
@@ -1329,9 +1285,7 @@ class CaptureService : Service() {
         return output
     }
 
-    // --------------------------------------------------
-    // EVALUATION STATISTICS
-    // --------------------------------------------------
+    // EVALUATION STORAGE
 
     private fun loadEvaluationStats() {
 
@@ -1369,9 +1323,7 @@ class CaptureService : Service() {
             .apply()
     }
 
-    // --------------------------------------------------
-    // RESET CURRENT SESSION
-    // --------------------------------------------------
+    // RESET CURRENT SESSION WITHOUT DELETING HISTORY
 
     private fun resetSession() {
 
@@ -1398,13 +1350,10 @@ class CaptureService : Service() {
         statusMessage =
             "جلسه جدید؛ در انتظار بازیابی تاریخچه..."
 
-        // IMPORTANT:
-        // No database or SharedPreferences records are deleted.
+        // No database records are deleted here.
     }
 
-    // --------------------------------------------------
     // FORECAST
-    // --------------------------------------------------
 
     private fun refreshForecast() {
 
@@ -1413,6 +1362,8 @@ class CaptureService : Service() {
                 history.toList()
             )
     }
+
+    // EVALUATE THE PREVIOUS FORECAST
 
     private fun evaluateForecast(
         forecast: PredictionEngine.Forecast,
@@ -1431,13 +1382,13 @@ class CaptureService : Service() {
         saveEvaluationStats()
     }
 
+    // REGISTER ONE NEW ROUND
+
     private fun registerNewRound(
         value: Double
     ) {
 
-        // Evaluate the previous one-round estimate first.
-        // The actual result is not added to training history
-        // until this evaluation has been completed.
+        // Evaluate before adding the actual result to history.
 
         currentForecast?.let {
 
@@ -1456,13 +1407,12 @@ class CaptureService : Service() {
             "OCR"
         )
 
-        // Calculate exactly one new future round.
+        // Produce exactly one new future-round forecast.
+
         refreshForecast()
     }
 
-    // --------------------------------------------------
     // HISTORY COMPARISON
-    // --------------------------------------------------
 
     private fun sameValue(
         first: Double,
@@ -1491,8 +1441,8 @@ class CaptureService : Service() {
         }
     }
 
-    // Compare stored chronological history with the
-    // chronological order of the visible baseline.
+    // Compare saved chronological history with
+    // the chronological order of the visible baseline.
 
     private fun findStoredOverlap(
         stored: List<Double>,
@@ -1543,7 +1493,7 @@ class CaptureService : Service() {
         val length: Int
     )
 
-    // New website results appear at the head of its list.
+    // New website results appear at the HEAD of the list.
 
     private fun findHeadOverlap(
         previous: List<Double>,
@@ -1620,9 +1570,13 @@ class CaptureService : Service() {
 
                     candidate.length > old.length ||
 
+                    // If equally long overlaps exist,
+                    // prefer the larger head shift because
+                    // new results enter at the head.
+
                     (
                         candidate.length == old.length &&
-                        candidate.visibleIndex < old.visibleIndex
+                        candidate.visibleIndex > old.visibleIndex
                     )
 
                 ) {
@@ -1635,9 +1589,7 @@ class CaptureService : Service() {
         return best
     }
 
-    // --------------------------------------------------
     // OBSERVE NEW OCR RESULTS
-    // --------------------------------------------------
 
     private fun observe(
         visible: List<Double>
@@ -1653,7 +1605,7 @@ class CaptureService : Service() {
             return
         }
 
-        // First OCR snapshot of this session.
+        // FIRST OCR SNAPSHOT
 
         if (previousVisible.isEmpty()) {
 
@@ -1662,9 +1614,7 @@ class CaptureService : Service() {
 
             if (history.isEmpty()) {
 
-                // First-ever database initialization.
-                // Existing visible results are saved as baseline,
-                // not counted as newly observed rounds.
+                // Save the initial visible history as baseline.
 
                 history.addAll(chronological)
 
@@ -1678,8 +1628,7 @@ class CaptureService : Service() {
 
             } else {
 
-                // Compare current website history with
-                // the last saved database results.
+                // Match the saved history with the website history.
 
                 val overlap = findStoredOverlap(
                     history,
@@ -1707,9 +1656,6 @@ class CaptureService : Service() {
 
                 } else {
 
-                    // No reliable overlap: do not insert a possibly
-                    // duplicated or unrelated baseline.
-
                     statusMessage =
                         "تاریخچه قبلی بارگذاری شد؛ مبنای جدید OCR تنظیم شد."
                 }
@@ -1723,6 +1669,8 @@ class CaptureService : Service() {
 
             return
         }
+
+        // NO CHANGE
 
         if (
             sameHistory(
@@ -1739,15 +1687,14 @@ class CaptureService : Service() {
             return
         }
 
+        // FIND NEW RESULTS AT THE HEAD
+
         val overlap = findHeadOverlap(
             previousVisible,
             visible
         )
 
-        if (
-            overlap == null ||
-            overlap.visibleIndex > MAX_NEW_PER_SCAN
-        ) {
+        if (overlap == null) {
 
             noOverlapCount++
 
@@ -1782,7 +1729,6 @@ class CaptureService : Service() {
                 .asReversed()
 
             newValues.forEach {
-
                 registerNewRound(it)
             }
         }
@@ -1801,9 +1747,7 @@ class CaptureService : Service() {
         render()
     }
 
-    // --------------------------------------------------
     // DISPLAY
-    // --------------------------------------------------
 
     private fun render() {
 
@@ -1818,13 +1762,22 @@ class CaptureService : Service() {
             0
         }
 
+        val recent = history
+            .takeLast(6)
+            .asReversed()
+            .joinToString(" • ") {
+                String.format(Locale.US, "%.2f", it)
+            }
+
         val counterText =
 
             "نمونه تاریخی: $count | " +
             "دور جدید: $totalNewRounds\n" +
 
             "ارزیابی: $evaluatedRounds | " +
-            "تطبیق بازه: $accuracy٪"
+            "تطبیق بازه: $accuracy٪\n" +
+
+            "آخرین ضرایب: $recent"
 
         val forecast = currentForecast
 
@@ -1856,12 +1809,14 @@ class CaptureService : Service() {
                     .joinToString(" | ")
 
             "برآورد آماری فقط برای دور بعد:\n" +
+
             "${forecast.range} " +
             "(${forecast.probabilityPercent}٪)\n\n" +
 
             distribution +
 
             "\n\nوزن موتورهای تحلیل:\n" +
+
             weights
         }
 
@@ -1875,9 +1830,7 @@ class CaptureService : Service() {
         }
     }
 
-    // --------------------------------------------------
-    // NOTIFICATION
-    // --------------------------------------------------
+    // NOTIFICATION CHANNEL
 
     private fun createChannel() {
 
@@ -1897,9 +1850,7 @@ class CaptureService : Service() {
         ).createNotificationChannel(channel)
     }
 
-    // --------------------------------------------------
     // CLEANUP
-    // --------------------------------------------------
 
     private fun stopCaptureResources() {
 
@@ -1945,7 +1896,6 @@ class CaptureService : Service() {
         try {
 
             overlay?.let {
-
                 windowManager?.removeView(it)
             }
 
@@ -1969,28 +1919,34 @@ class CaptureService : Service() {
         processing.set(false)
     }
 
-    // --------------------------------------------------
     // DESTROY
-    // --------------------------------------------------
 
     override fun onDestroy() {
 
         sessionGeneration++
 
-        // Finish the session only after pending database writes.
         val sessionId = activeSessionId
 
         val dao = gameDao
 
         val pending = writeTail
 
-        if (sessionId > 0L && dao != null) {
+        // Wait for pending writes before closing the session.
 
-            serviceScope.launch {
+        serviceScope.launch {
+
+            try {
 
                 pending?.join()
 
-                dao.finishSession(sessionId)
+                if (sessionId > 0L && dao != null) {
+
+                    dao.finishSession(sessionId)
+                }
+
+            } finally {
+
+                serviceScope.cancel()
             }
         }
 
