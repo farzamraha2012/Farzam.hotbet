@@ -21,329 +21,55 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.content.pm.ServiceInfo
+
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+import java.util.Locale
 import java.util.regex.Pattern
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.Locale
+
 import kotlin.math.abs
+import kotlin.math.max
 
 class CaptureService : Service() {
 
     companion object {
-        const val ACTION_START = "com.example.hotbetanalyzer.START"
+
+        const val ACTION_START =
+            "com.example.hotbetanalyzer.START"
 
         private const val CHANNEL = "screen_reader"
+
         private const val MAX_VISIBLE_ROWS = 35
+
         private const val MAX_NEW_PER_SCAN = 12
-        private const val PREFS = "hotbet_phoenix_stats"
+
+        private const val PREFS = "hotbet_evaluation"
+
+        private const val OVERLAP_TOLERANCE = 0.015
     }
 
-    // ------------------------------------------
-    // DATABASE AND COROUTINES
-    // ------------------------------------------
-
-    private val databaseScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO
-    )
-
-    private val databaseMutex = Mutex()
-
-    @Volatile
-    private var databaseSessionId: Long? = null
-
-    private var databaseSequence = 0
-
-    private val gameDatabase by lazy {
-        GameDatabase.getInstance(applicationContext)
-    }
-
-    /**
-     * Persists every accepted result. There is deliberately no record cap:
-     * Room remains the permanent history store; the in-memory list mirrors it.
-     */
-    private fun persistResults(
-        values: List<Double>,
-        source: String
-    ) {
-        val safeValues = values.filter {
-            it.isFinite() && it in 0.0..10000.0
-        }
-        if (safeValues.isEmpty()) return
-
-        databaseScope.launch {
-            try {
-                databaseMutex.withLock {
-                    val dao = gameDatabase.gameDao()
-                    var sessionId = databaseSessionId
-
-                    if (sessionId == null) {
-                        sessionId = dao.createSession(GameSession())
-                        databaseSessionId = sessionId
-                        databaseSequence = 0
-                    }
-
-                    safeValues.forEach { multiplier ->
-                        databaseSequence++
-                        dao.insertResult(
-                            GameResult(
-                                sessionId = sessionId,
-                                sequenceNumber = databaseSequence,
-                                multiplier = multiplier,
-                                source = source,
-                                recordedAt = System.currentTimeMillis()
-                            )
-                        )
-                    }
-                    dao.refreshSessionCount(sessionId)
-                }
-            } catch (e: Exception) {
-                ui.post {
-                    statusMessage =
-                        "خطا در ذخیره تاریخچه: ${e.javaClass.simpleName}"
-                    render()
-                }
-            }
-        }
-    }
-
-    /**
-     * Rebuilds the complete chronological history from every Room session.
-     * Baseline rows from a later app launch are merged against the previous
-     * history tail, preventing the same visible rows from being appended again.
-     */
-    private suspend fun restoreStoredHistory(): List<Double> {
-        val dao = gameDatabase.gameDao()
-        dao.finishAllActiveSessions()
-
-        val sessions = dao.getAllSessions()
-        val merged = mutableListOf<Double>()
-
-        for (session in sessions) {
-            val rows = dao.getSessionResults(session.id)
-            val baseline = rows
-                .filter { it.source == "OCR_BASELINE" }
-                .map { it.multiplier }
-                .filter { it.isFinite() && it in 0.0..10000.0 }
-
-            val newResults = rows
-                .filter { it.source != "OCR_BASELINE" }
-                .map { it.multiplier }
-                .filter { it.isFinite() && it in 0.0..10000.0 }
-
-            if (baseline.isNotEmpty()) {
-                if (merged.isEmpty()) {
-                    merged.addAll(baseline)
-                } else {
-                    val overlap = suffixPrefixOverlap(merged, baseline)
-                    if (overlap > 0) {
-                        merged.addAll(baseline.drop(overlap))
-                    } else {
-                        // No common rows: likely a new game/table session.
-                        merged.addAll(baseline)
-                    }
-                }
-            }
-
-            merged.addAll(newResults)
-        }
-
-        return merged
-    }
-
-    /**
-     * Restore Room before starting MediaProjection/OCR. This avoids a race in
-     * which the first OCR baseline overwrites the in-memory training history.
-     */
-    private fun startAfterDatabaseRestore(
-        resultCode: Int,
-        data: Intent
-    ) {
-        val generation = sessionGeneration
-
-        databaseScope.launch {
-            try {
-                val restored = databaseMutex.withLock {
-                    val dao = gameDatabase.gameDao()
-                    val historyFromDisk = restoreStoredHistory()
-
-                    val newSessionId = dao.createSession(GameSession())
-                    databaseSessionId = newSessionId
-                    databaseSequence = 0
-
-                    historyFromDisk
-                }
-
-                ui.post {
-                    if (generation != sessionGeneration) return@post
-
-                    history.clear()
-                    history.addAll(restored)
-                    totalNewRounds = 0
-
-                    val savedFingerprint = getSharedPreferences(
-                        PREFS,
-                        MODE_PRIVATE
-                    ).getString("pending_fingerprint", null)
-
-                    if (
-                        pendingForecast == null ||
-                        savedFingerprint != historyFingerprint(history)
-                    ) {
-                        updateForecast()
-                    }
-
-                    statusMessage = if (history.isEmpty()) {
-                        "تاریخچه‌ای ذخیره نشده؛ در انتظار خواندن مبنای اولیه..."
-                    } else {
-                        "${history.size} ضریب از حافظه دائمی بازیابی شد."
-                    }
-
-                    try {
-                        showOverlay()
-                        begin(resultCode, data)
-                        render()
-                    } catch (e: Exception) {
-                        statusMessage = "خطا در شروع سرویس: ${e.message}"
-                        render()
-                        stopSelf()
-                    }
-                }
-            } catch (e: Exception) {
-                ui.post {
-                    if (generation == sessionGeneration) {
-                        statusMessage =
-                            "خطا در بازیابی تاریخچه: ${e.javaClass.simpleName}"
-                        render()
-                        stopSelf()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun historyFingerprint(values: List<Double>): String {
-        val tail = values.takeLast(8).joinToString(",") {
-            String.format(Locale.US, "%.3f", it)
-        }
-        return "${values.size}:$tail"
-    }
-
-    private fun updateForecast() {
-        pendingForecast = PredictionEngine.forecast(history)
-        savePendingForecast(pendingForecast)
-    }
-
-    private fun savePendingForecast(
-        forecast: PredictionEngine.Forecast?
-    ) {
-        val editor = getSharedPreferences(
-            PREFS,
-            MODE_PRIVATE
-        ).edit()
-
-        if (forecast == null) {
-            editor.remove("pending_range")
-            editor.remove("pending_probabilities")
-            editor.remove("pending_weights")
-            editor.remove("pending_samples")
-            editor.remove("pending_fingerprint")
-        } else {
-            editor.putString("pending_range", forecast.range)
-            editor.putString(
-                "pending_probabilities",
-                forecast.probabilities.joinToString(",") {
-                    String.format(Locale.US, "%.1f", it)
-                }
-            )
-            editor.putString(
-                "pending_weights",
-                forecast.modelWeights.joinToString(",") {
-                    String.format(Locale.US, "%.1f", it)
-                }
-            )
-            editor.putInt("pending_samples", forecast.sampleCount)
-            editor.putString(
-                "pending_fingerprint",
-                historyFingerprint(history)
-            )
-        }
-
-        editor.apply()
-    }
-
-    private fun readPendingForecast(): PredictionEngine.Forecast? {
-        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val range = prefs.getString("pending_range", null) ?: return null
-
-        val probabilities = prefs.getString(
-            "pending_probabilities",
-            null
-        )?.split(",")?.mapNotNull { it.toDoubleOrNull() } ?: return null
-
-        val weights = prefs.getString(
-            "pending_weights",
-            null
-        )?.split(",")?.mapNotNull { it.toDoubleOrNull() } ?: return null
-
-        if (probabilities.size != 5 || weights.size != 5) return null
-
-        val best = probabilities.indices.maxByOrNull {
-            probabilities[it]
-        } ?: return null
-
-        return PredictionEngine.Forecast(
-            bucketIndex = best,
-            range = range,
-            probabilityPercent = probabilities[best],
-            probabilities = probabilities,
-            modelWeights = weights,
-            sampleCount = prefs.getInt("pending_samples", 0)
-        )
-    }
-
-    /**
-     * Finishes the current database session.
-     */
-    private fun finishDatabaseSession() {
-
-        databaseScope.launch {
-            try {
-                databaseMutex.withLock {
-
-                    val sessionId = databaseSessionId
-                        ?: return@withLock
-
-                    gameDatabase.gameDao().finishSession(
-                        sessionId
-                    )
-
-                    databaseSessionId = null
-                    databaseSequence = 0
-                }
-
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    // ------------------------------------------
+    // --------------------------------------------------
     // SCREEN CAPTURE
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private var projection: MediaProjection? = null
+
     private var display: VirtualDisplay? = null
+
     private var reader: ImageReader? = null
 
     private var worker: HandlerThread? = null
+
     private var handler: Handler? = null
 
     private val ui = Handler(Looper.getMainLooper())
@@ -363,42 +89,73 @@ class CaptureService : Service() {
 
     private var noOverlapCount = 0
 
-    // ------------------------------------------
+    // --------------------------------------------------
+    // DATABASE
+    // --------------------------------------------------
+
+    private val serviceScope =
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.IO
+        )
+
+    private var gameDao: GameDao? = null
+
+    @Volatile
+    private var activeSessionId = 0L
+
+    private var sessionSequence = 0
+
+    private var writeTail: Job? = null
+
+    // --------------------------------------------------
     // FLOATING WINDOW
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private var overlay: View? = null
+
     private var windowManager: WindowManager? = null
-    private var overlayParams: WindowManager.LayoutParams? = null
+
+    private var overlayParams:
+        WindowManager.LayoutParams? = null
 
     private var statusText: TextView? = null
+
     private var statsText: TextView? = null
-    private var collapseButton: TextView? = null
+
     private var details: LinearLayout? = null
+
+    private var collapseButton: TextView? = null
 
     private var isCompact = false
 
-    // ------------------------------------------
-    // ANALYSIS DATA
-    // ------------------------------------------
+    // --------------------------------------------------
+    // HISTORY
+    // --------------------------------------------------
 
-    // Oldest -> newest
+    // Oldest -> newest.
     private val history = mutableListOf<Double>()
 
-    // Website order: newest -> oldest
+    // Newest -> oldest, exactly as displayed on website.
     private var previousVisible = emptyList<Double>()
 
-    // Exactly one pending prediction: the next round only.
-    private var pendingForecast: PredictionEngine.Forecast? = null
-
     private var totalNewRounds = 0
+
+    private var currentForecast:
+        PredictionEngine.Forecast? = null
+
+    // --------------------------------------------------
+    // EVALUATION
+    // --------------------------------------------------
+
     private var evaluatedRounds = 0
+
     private var successfulRanges = 0
 
     private var statusMessage =
         "در انتظار خواندن تاریخچه ضرایب..."
+
     private val number = Pattern.compile(
-        "(?<![0-9])([0-9]{1,5}[.,][0-9]{1,2})(?![0-9])"
+        "(?<![0-9])([0-9]{1,5}[.,][0-9]{1,3})(?![0-9])"
     )
 
     private val projectionCallback =
@@ -411,16 +168,22 @@ class CaptureService : Service() {
             }
         }
 
-    // ------------------------------------------
-    // SERVICE LIFECYCLE
-    // ------------------------------------------
+    // --------------------------------------------------
+    // CREATE
+    // --------------------------------------------------
 
     override fun onCreate() {
+
         super.onCreate()
 
         createChannel()
+
         loadEvaluationStats()
     }
+
+    // --------------------------------------------------
+    // START SERVICE
+    // --------------------------------------------------
 
     override fun onStartCommand(
         intent: Intent?,
@@ -432,22 +195,27 @@ class CaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification = Notification.Builder(
-            this,
-            CHANNEL
-        )
-            .setContentTitle("HOTBET • Phoenix Analyzer")
-            .setContentText("در حال تحلیل تاریخچه ضرایب")
-            .setSmallIcon(R.drawable.ic_stat_capture)
-            .setOngoing(true)
-            .build()
+        val notification =
+            Notification.Builder(this, CHANNEL)
+                .setContentTitle(
+                    "HOTBET • Phoenix Analyzer"
+                )
+                .setContentText(
+                    "در حال تحلیل تاریخچه ضرایب"
+                )
+                .setSmallIcon(
+                    R.drawable.ic_stat_capture
+                )
+                .setOngoing(true)
+                .build()
 
         if (Build.VERSION.SDK_INT >= 29) {
 
             startForeground(
                 71,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                android.content.pm.ServiceInfo
+                    .FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             )
 
         } else {
@@ -456,7 +224,12 @@ class CaptureService : Service() {
         }
 
         if (!Settings.canDrawOverlays(this)) {
+
+            statusMessage =
+                "مجوز پنجره شناور فعال نیست."
+
             stopSelf()
+
             return START_NOT_STICKY
         }
 
@@ -467,48 +240,194 @@ class CaptureService : Service() {
 
         @Suppress("DEPRECATION")
         val data = if (Build.VERSION.SDK_INT >= 33) {
+
             intent.getParcelableExtra(
                 "data",
                 Intent::class.java
             )
+
         } else {
+
             intent.getParcelableExtra<Intent>("data")
         }
 
         if (code != Activity.RESULT_OK || data == null) {
+
             stopSelf()
+
             return START_NOT_STICKY
         }
 
         if (projection != null || overlay != null) {
+
             stopCaptureResources()
         }
 
         resetSession()
-        startAfterDatabaseRestore(code, data)
+
+        initializeStorageAndBegin(code, data)
 
         return START_NOT_STICKY
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
+    // LOAD DATABASE BEFORE OCR
+    // --------------------------------------------------
+
+    private fun initializeStorageAndBegin(
+        code: Int,
+        data: Intent
+    ) {
+
+        val generation = sessionGeneration
+
+        serviceScope.launch {
+
+            try {
+
+                val dao = GameDatabase
+                    .getInstance(applicationContext)
+                    .gameDao()
+
+                // Close any session left active by a previous run.
+                dao.finishAllActiveSessions()
+
+                // Load all previously saved multipliers.
+                val stored = dao.getAllMultipliers()
+
+                // Create a fresh session without deleting old records.
+                val newSessionId = dao.createSession(
+                    GameSession()
+                )
+
+                withContext(Dispatchers.Main) {
+
+                    if (generation != sessionGeneration) {
+                        return@withContext
+                    }
+
+                    gameDao = dao
+
+                    activeSessionId = newSessionId
+
+                    sessionSequence = 0
+
+                    history.clear()
+
+                    history.addAll(
+                        stored.filter {
+                            it.isFinite() &&
+                                it > 0.0 &&
+                                it <= 10000.0
+                        }
+                    )
+
+                    refreshForecast()
+
+                    statusMessage =
+                        "${history.size} ضریب از حافظه دائمی بازیابی شد."
+
+                    showOverlay()
+
+                    try {
+
+                        begin(code, data)
+
+                    } catch (e: Exception) {
+
+                        statusMessage =
+                            "خطا در شروع ضبط: ${e.message}"
+
+                        render()
+
+                        stopSelf()
+                    }
+                }
+
+            } catch (e: Exception) {
+
+                ui.post {
+
+                    statusMessage =
+                        "خطا در بازیابی دیتابیس: ${e.message}"
+
+                    render()
+
+                    stopSelf()
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------
+    // PERSIST RESULTS
+    // --------------------------------------------------
+
+    private fun persistResults(
+        values: List<Double>,
+        source: String = "OCR"
+    ) {
+
+        if (values.isEmpty()) return
+
+        val dao = gameDao ?: return
+
+        val sessionId = activeSessionId
+
+        if (sessionId <= 0L) return
+
+        val firstSequence = sessionSequence + 1
+
+        sessionSequence += values.size
+
+        // Queue database writes in order.
+        val previousWrite = writeTail
+
+        writeTail = serviceScope.launch {
+
+            previousWrite?.join()
+
+            values.forEachIndexed { index, multiplier ->
+
+                dao.insertResult(
+                    GameResult(
+                        sessionId = sessionId,
+                        sequenceNumber = firstSequence + index,
+                        multiplier = multiplier,
+                        source = source
+                    )
+                )
+            }
+
+            dao.refreshSessionCount(sessionId)
+        }
+    }
+
+    // --------------------------------------------------
     // FLOATING WINDOW
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun showOverlay() {
 
-        val wm = getSystemService(
-            WINDOW_SERVICE
-        ) as WindowManager
+        val wm =
+            getSystemService(WINDOW_SERVICE) as WindowManager
 
         windowManager = wm
 
         val dp = resources.displayMetrics.density
 
-        fun px(value: Int) = (value * dp).toInt()
+        fun px(value: Int) =
+            (value * dp).toInt()
 
         val white = Color.WHITE
-        val dim = Color.rgb(190, 198, 211)
-        val gold = Color.rgb(225, 183, 77)
+
+        val dim = Color.rgb(
+            190, 198, 211
+        )
+
+        val gold = Color.rgb(
+            225, 183, 77
+        )
 
         val panel = LinearLayout(this).apply {
 
@@ -537,20 +456,30 @@ class CaptureService : Service() {
                 )
             }
 
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            layoutDirection =
+                View.LAYOUT_DIRECTION_RTL
         }
 
         val header = LinearLayout(this).apply {
+
             orientation = LinearLayout.HORIZONTAL
+
             gravity = Gravity.CENTER_VERTICAL
         }
 
         val title = TextView(this).apply {
 
-            text = "🔥 HOTBET • تحلیل‌گر"
+            text = "🔥 HOTBET • PHOENIX"
+
             textSize = 12f
+
             setTextColor(gold)
-            setTypeface(null, Typeface.BOLD)
+
+            setTypeface(
+                null,
+                Typeface.BOLD
+            )
+
             gravity = Gravity.RIGHT
         }
 
@@ -566,15 +495,15 @@ class CaptureService : Service() {
         collapseButton = TextView(this).apply {
 
             text = "−"
+
             textSize = 22f
+
             gravity = Gravity.CENTER
+
             setTextColor(white)
 
             setPadding(
-                px(8),
-                px(1),
-                px(8),
-                px(1)
+                px(8), px(1), px(8), px(1)
             )
 
             background = buttonBackground(dp)
@@ -587,15 +516,15 @@ class CaptureService : Service() {
         val close = TextView(this).apply {
 
             text = "×"
+
             textSize = 23f
+
             gravity = Gravity.CENTER
+
             setTextColor(white)
 
             setPadding(
-                px(8),
-                px(1),
-                px(8),
-                px(1)
+                px(8), px(1), px(8), px(1)
             )
 
             background = buttonBackground(dp)
@@ -609,7 +538,10 @@ class CaptureService : Service() {
 
         header.addView(
             View(this),
-            LinearLayout.LayoutParams(px(8), 1)
+            LinearLayout.LayoutParams(
+                px(8),
+                1
+            )
         )
 
         header.addView(close)
@@ -617,21 +549,23 @@ class CaptureService : Service() {
         panel.addView(header)
 
         details = LinearLayout(this).apply {
+
             orientation = LinearLayout.VERTICAL
         }
 
         statusText = TextView(this).apply {
 
             textSize = 10f
+
             setTextColor(dim)
+
             gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
+
+            textDirection =
+                View.TEXT_DIRECTION_RTL
 
             setPadding(
-                0,
-                px(7),
-                0,
-                px(6)
+                0, px(7), 0, px(6)
             )
         }
 
@@ -639,17 +573,20 @@ class CaptureService : Service() {
 
         val legend = TextView(this).apply {
 
-            text = "زیر۲ / ۲-۴ / ۴-۶ / ۶-۱۰ / بالای۱۰"
+            text =
+                "زیر۲ / ۲-۴ / ۴-۶ / ۶-۱۰ / بالای۱۰"
+
             textSize = 9f
+
             setTextColor(dim)
+
             gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
+
+            textDirection =
+                View.TEXT_DIRECTION_RTL
 
             setPadding(
-                px(2),
-                px(3),
-                px(2),
-                px(4)
+                px(2), px(3), px(2), px(4)
             )
         }
 
@@ -658,10 +595,18 @@ class CaptureService : Service() {
         statsText = TextView(this).apply {
 
             textSize = 9f
+
             setTextColor(white)
-            setTypeface(null, Typeface.BOLD)
+
+            setTypeface(
+                null,
+                Typeface.BOLD
+            )
+
             gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
+
+            textDirection =
+                View.TEXT_DIRECTION_RTL
 
             setLineSpacing(
                 px(2).toFloat(),
@@ -676,7 +621,11 @@ class CaptureService : Service() {
             )
 
             background = GradientDrawable().apply {
-                setColor(Color.rgb(39, 46, 59))
+
+                setColor(
+                    Color.rgb(39, 46, 59)
+                )
+
                 cornerRadius = 10 * dp
             }
         }
@@ -685,17 +634,20 @@ class CaptureService : Service() {
 
         val disclaimer = TextView(this).apply {
 
-            text = "برآورد آماری؛ بدون تضمین نتیجه"
+            text =
+                "برآورد آماری؛ بدون تضمین نتیجه"
+
             textSize = 9f
+
             setTextColor(dim)
+
             gravity = Gravity.RIGHT
-            textDirection = View.TEXT_DIRECTION_RTL
+
+            textDirection =
+                View.TEXT_DIRECTION_RTL
 
             setPadding(
-                0,
-                px(6),
-                0,
-                px(3)
+                0, px(6), 0, px(3)
             )
         }
 
@@ -706,16 +658,20 @@ class CaptureService : Service() {
         val instagram = TextView(this).apply {
 
             text = "◎  @2farzam2"
+
             textSize = 11f
+
             setTextColor(gold)
-            setTypeface(null, Typeface.BOLD)
+
+            setTypeface(
+                null,
+                Typeface.BOLD
+            )
+
             gravity = Gravity.CENTER
 
             setPadding(
-                0,
-                px(7),
-                0,
-                px(2)
+                0, px(7), 0, px(2)
             )
         }
 
@@ -744,7 +700,8 @@ class CaptureService : Service() {
 
         ).apply {
 
-            gravity = Gravity.TOP or Gravity.START
+            gravity =
+                Gravity.TOP or Gravity.START
 
             x = (
                 displayWidth - panelWidth - px(10)
@@ -755,16 +712,19 @@ class CaptureService : Service() {
 
         overlayParams = params
 
+        // Drag panel from its header.
+
         header.setOnTouchListener(
+
             object : View.OnTouchListener {
 
                 private var startX = 0
+
                 private var startY = 0
 
                 private var touchX = 0f
-                private var touchY = 0f
 
-                private var moved = false
+                private var touchY = 0f
 
                 override fun onTouch(
                     v: View,
@@ -776,48 +736,42 @@ class CaptureService : Service() {
                         MotionEvent.ACTION_DOWN -> {
 
                             startX = params.x
+
                             startY = params.y
 
                             touchX = event.rawX
-                            touchY = event.rawY
 
-                            moved = false
+                            touchY = event.rawY
 
                             true
                         }
 
                         MotionEvent.ACTION_MOVE -> {
 
-                            val dx = event.rawX - touchX
-                            val dy = event.rawY - touchY
+                            val dx =
+                                event.rawX - touchX
 
-                            if (
-                                abs(dx) > px(4) ||
-                                abs(dy) > px(4)
-                            ) {
-                                moved = true
-                            }
-                            if (moved) {
+                            val dy =
+                                event.rawY - touchY
 
-                                val maxX = (
-                                    displayWidth - params.width
-                                ).coerceAtLeast(0)
+                            val maxX = (
+                                displayWidth - params.width
+                            ).coerceAtLeast(0)
 
-                                val maxY = (
-                                    resources.displayMetrics.heightPixels -
-                                        px(80)
-                                ).coerceAtLeast(0)
+                            val maxY = (
+                                resources.displayMetrics.heightPixels -
+                                    px(80)
+                            ).coerceAtLeast(0)
 
-                                params.x = (
-                                    startX + dx
-                                ).toInt().coerceIn(0, maxX)
+                            params.x = (
+                                startX + dx
+                            ).toInt().coerceIn(0, maxX)
 
-                                params.y = (
-                                    startY + dy
-                                ).toInt().coerceIn(0, maxY)
+                            params.y = (
+                                startY + dy
+                            ).toInt().coerceIn(0, maxY)
 
-                                updateOverlay()
-                            }
+                            updateOverlay()
 
                             true
                         }
@@ -839,11 +793,15 @@ class CaptureService : Service() {
         render()
     }
 
-    private fun buttonBackground(dp: Float): GradientDrawable {
+    private fun buttonBackground(
+        dp: Float
+    ): GradientDrawable {
 
         return GradientDrawable().apply {
 
-            setColor(Color.rgb(48, 54, 65))
+            setColor(
+                Color.rgb(48, 54, 65)
+            )
 
             cornerRadius = 8 * dp
 
@@ -857,38 +815,43 @@ class CaptureService : Service() {
     private fun toggleCompactMode() {
 
         val currentDetails = details ?: return
+
         val button = collapseButton ?: return
+
         val panel = overlay ?: return
+
         val params = overlayParams ?: return
 
         isCompact = !isCompact
 
         currentDetails.visibility =
-            if (isCompact) View.GONE else View.VISIBLE
+            if (isCompact) View.GONE
+            else View.VISIBLE
 
-        button.text = if (isCompact) "+" else "−"
+        button.text =
+            if (isCompact) "+" else "−"
 
         val dp = resources.displayMetrics.density
 
-        val width = if (isCompact) {
-            (190 * dp).toInt()
-        } else {
-            (245 * dp).toInt()
-        }
-
         params.width = minOf(
-            width,
+
+            if (isCompact) {
+                (190 * dp).toInt()
+            } else {
+                (245 * dp).toInt()
+            },
+
             resources.displayMetrics.widthPixels -
                 (20 * dp).toInt()
         )
 
-        params.x = params.x.coerceAtLeast(0)
-
         try {
+
             windowManager?.updateViewLayout(
                 panel,
                 params
             )
+
         } catch (_: Exception) {
         }
     }
@@ -898,6 +861,7 @@ class CaptureService : Service() {
         try {
 
             val panel = overlay ?: return
+
             val params = overlayParams ?: return
 
             windowManager?.updateViewLayout(
@@ -909,22 +873,24 @@ class CaptureService : Service() {
         }
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // SCREEN CAPTURE
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun begin(
         code: Int,
         data: Intent
     ) {
 
-        val mgr = getSystemService(
-            MEDIA_PROJECTION_SERVICE
-        ) as MediaProjectionManager
+        val mgr =
+            getSystemService(MEDIA_PROJECTION_SERVICE)
+                as MediaProjectionManager
 
         val mp = mgr.getMediaProjection(
             code,
             data
+        ) ?: throw IllegalStateException(
+            "دسترسی ضبط صفحه برقرار نشد"
         )
 
         projection = mp
@@ -942,16 +908,23 @@ class CaptureService : Service() {
             it.start()
         }
 
-        handler = Handler(worker!!.looper)
+        handler = Handler(
+            worker!!.looper
+        )
 
         reader = ImageReader.newInstance(
+
             dm.widthPixels,
+
             dm.heightPixels,
+
             PixelFormat.RGBA_8888,
+
             3
         )
 
         reader!!.setOnImageAvailableListener(
+
             { r ->
 
                 val image = r.acquireLatestImage()
@@ -973,31 +946,42 @@ class CaptureService : Service() {
 
                 recognize(image)
             },
+
             handler
         )
 
         display = mp.createVirtualDisplay(
+
             "HotBetReader",
+
             dm.widthPixels,
+
             dm.heightPixels,
+
             dm.densityDpi,
+
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+
             reader!!.surface,
+
             null,
+
             handler
         )
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // OCR
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun recognize(image: Image) {
 
         val generation = sessionGeneration
 
         var fullBitmap: Bitmap? = null
+
         var cropBitmap: Bitmap? = null
+
         var ocrBitmap: Bitmap? = null
 
         try {
@@ -1008,8 +992,11 @@ class CaptureService : Service() {
                 plane.rowStride / plane.pixelStride
 
             val padded = Bitmap.createBitmap(
+
                 paddedWidth,
+
                 image.height,
+
                 Bitmap.Config.ARGB_8888
             )
 
@@ -1018,14 +1005,20 @@ class CaptureService : Service() {
             )
 
             fullBitmap = Bitmap.createBitmap(
+
                 padded,
+
                 0,
+
                 0,
+
                 image.width,
+
                 image.height
             )
 
             padded.recycle()
+
             image.close()
 
             val source = fullBitmap
@@ -1033,7 +1026,9 @@ class CaptureService : Service() {
                     "صفحه قابل خواندن نیست"
                 )
 
-            // Existing calibrated capture region.
+            // Calibrated capture region for the supplied
+            // portrait HotBet mobile layout.
+
             val left = (
                 source.width * 0.10f
             ).toInt().coerceIn(
@@ -1063,35 +1058,45 @@ class CaptureService : Service() {
             )
 
             val cropped = Bitmap.createBitmap(
+
                 source,
+
                 left,
+
                 top,
+
                 right - left,
+
                 bottom - top
             )
 
             cropBitmap = cropped
 
             source.recycle()
+
             fullBitmap = null
 
-            val prepared = prepareForOcr(cropped)
+            val prepared = prepareForOcr(
+                cropped
+            )
 
             ocrBitmap = prepared
 
             recognizer.process(
+
                 InputImage.fromBitmap(
                     prepared,
                     0
                 )
-            )
-                .addOnSuccessListener { result ->
 
-                    if (generation != sessionGeneration) {
-                        return@addOnSuccessListener
-                    }
+            ).addOnSuccessListener { result ->
 
-                    val rows = result.textBlocks
+                if (generation != sessionGeneration) {
+                    return@addOnSuccessListener
+                }
+
+                val candidates =
+                    result.textBlocks
                         .flatMap { it.lines }
                         .mapNotNull { line ->
 
@@ -1112,47 +1117,74 @@ class CaptureService : Service() {
 
                             if (
                                 value == null ||
-                                value !in 0.0..10000.0
+                                !value.isFinite() ||
+                                value <= 0.0 ||
+                                value > 10000.0
                             ) {
+
                                 null
+
                             } else {
+
                                 box.top to value
                             }
                         }
-                        .sortedBy { it.first }
-                        .distinctBy { it.first / 18 }
-                        .take(MAX_VISIBLE_ROWS)
+                        .sortedBy {
+                            it.first
+                        }
 
-                    observe(
-                        rows.map { it.second }
-                    )
-                }
-                .addOnFailureListener {
+                // Remove duplicate OCR lines by vertical position.
+                // Repeated multiplier values at different rows remain valid.
 
-                    if (generation == sessionGeneration) {
+                val uniqueRows =
+                    mutableListOf<Pair<Int, Double>>()
 
-                        statusMessage =
-                            "خطای تشخیص متن؛ تاریخچه را واضح نگه دارید."
+                candidates.forEach { row ->
 
-                        render()
+                    val last = uniqueRows.lastOrNull()
+
+                    if (
+                        last == null ||
+                        abs(row.first - last.first) > 8
+                    ) {
+                        uniqueRows.add(row)
                     }
                 }
-                .addOnCompleteListener {
 
-                    try {
-                        prepared.recycle()
-                    } catch (_: Exception) {
-                    }
+                val visible = uniqueRows
+                    .take(MAX_VISIBLE_ROWS)
+                    .map { it.second }
 
-                    try {
-                        cropped.recycle()
-                    } catch (_: Exception) {
-                    }
+                observe(visible)
+            }
 
-                    if (generation == sessionGeneration) {
-                        processing.set(false)
-                    }
+            .addOnFailureListener {
+
+                if (generation == sessionGeneration) {
+
+                    statusMessage =
+                        "خطای تشخیص متن؛ تاریخچه را واضح نگه دارید."
+
+                    render()
                 }
+            }
+
+            .addOnCompleteListener {
+
+                try {
+                    prepared.recycle()
+                } catch (_: Exception) {
+                }
+
+                try {
+                    cropped.recycle()
+                } catch (_: Exception) {
+                }
+
+                if (generation == sessionGeneration) {
+                    processing.set(false)
+                }
+            }
 
         } catch (e: Exception) {
 
@@ -1181,24 +1213,34 @@ class CaptureService : Service() {
                 processing.set(false)
 
                 statusMessage =
-                    "خطا در پردازش تصویر"
+                    "خطا در پردازش تصویر: ${e.message}"
 
                 render()
             }
         }
     }
 
+    // --------------------------------------------------
+    // IMAGE PREPARATION
+    // --------------------------------------------------
+
     private fun prepareForOcr(
         source: Bitmap
     ): Bitmap {
 
         val scaled = Bitmap.createScaledBitmap(
+
             source,
-            source.width * 3,
-            source.height * 3,
+
+            source.width * 2,
+
+            source.height * 2,
+
             true
         )
+
         val width = scaled.width
+
         val height = scaled.height
 
         val pixels = IntArray(
@@ -1206,12 +1248,19 @@ class CaptureService : Service() {
         )
 
         scaled.getPixels(
+
             pixels,
+
             0,
+
             width,
+
             0,
+
             0,
+
             width,
+
             height
         )
 
@@ -1220,41 +1269,57 @@ class CaptureService : Service() {
             val color = pixels[i]
 
             val gray = (
+
                 Color.red(color) * 299 +
-                    Color.green(color) * 587 +
-                    Color.blue(color) * 114
-                ) / 1000
+
+                Color.green(color) * 587 +
+
+                Color.blue(color) * 114
+
+            ) / 1000
 
             val contrast = (
-                (gray - 128) * 1.6f + 128f
-            ).toInt().coerceIn(0, 255)
 
-            val value = if (contrast < 215) {
-                0
-            } else {
+                (gray - 128) * 1.6f + 128f
+
+            ).toInt().coerceIn(
+                0,
                 255
-            }
+            )
+
+            // Preserve grayscale information instead
+            // of applying an aggressive black/white threshold.
 
             pixels[i] = Color.rgb(
-                value,
-                value,
-                value
+                contrast,
+                contrast,
+                contrast
             )
         }
 
         val output = Bitmap.createBitmap(
+
             width,
+
             height,
+
             Bitmap.Config.ARGB_8888
         )
 
         output.setPixels(
+
             pixels,
+
             0,
+
             width,
+
             0,
+
             0,
+
             width,
+
             height
         )
 
@@ -1263,84 +1328,148 @@ class CaptureService : Service() {
         return output
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // EVALUATION STATISTICS
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun loadEvaluationStats() {
-        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        evaluatedRounds = prefs.getInt("evaluated", 0)
-        successfulRanges = prefs.getInt("successful", 0)
-        pendingForecast = readPendingForecast()
+
+        val prefs = getSharedPreferences(
+            PREFS,
+            MODE_PRIVATE
+        )
+
+        evaluatedRounds = prefs.getInt(
+            "evaluated",
+            0
+        )
+
+        successfulRanges = prefs.getInt(
+            "successful",
+            0
+        )
     }
 
     private fun saveEvaluationStats() {
-        getSharedPreferences(PREFS, MODE_PRIVATE)
+
+        getSharedPreferences(
+            PREFS,
+            MODE_PRIVATE
+        )
             .edit()
-            .putInt("evaluated", evaluatedRounds)
-            .putInt("successful", successfulRanges)
+            .putInt(
+                "evaluated",
+                evaluatedRounds
+            )
+            .putInt(
+                "successful",
+                successfulRanges
+            )
             .apply()
     }
 
+    // --------------------------------------------------
+    // RESET CURRENT SESSION
+    // --------------------------------------------------
+
     private fun resetSession() {
+
         sessionGeneration++
 
         history.clear()
+
         previousVisible = emptyList()
 
         totalNewRounds = 0
+
+        currentForecast = null
+
         noOverlapCount = 0
+
         lastAt = 0L
 
         processing.set(false)
 
-        // Keep the persisted pending forecast until the restored history
-        // fingerprint tells us whether it is still the correct next-round call.
-        statusMessage = "در حال بازیابی تاریخچه دائمی..."
+        activeSessionId = 0L
+
+        sessionSequence = 0
+
+        statusMessage =
+            "جلسه جدید؛ در انتظار بازیابی تاریخچه..."
+
+        // IMPORTANT:
+        // No database or SharedPreferences records are deleted.
     }
 
-    // ------------------------------------------
-    // HISTORY MATCHING
-    // ------------------------------------------
+    // --------------------------------------------------
+    // FORECAST
+    // --------------------------------------------------
 
-    private data class OverlapMatch(
-        val visibleIndex: Int,
-        val length: Int
-    )
+    private fun refreshForecast() {
 
-    /**
-     * Finds the longest overlap between the end of stored chronological
-     * history and the beginning of a newly read chronological baseline.
-     */
-    private fun suffixPrefixOverlap(
-        stored: List<Double>,
-        baseline: List<Double>
-    ): Int {
-        val limit = minOf(stored.size, baseline.size)
-        val required = minOf(3, limit)
-        for (length in limit downTo required) {
-            var matches = true
-            for (index in 0 until length) {
-                if (!sameValue(
-                        stored[stored.size - length + index],
-                        baseline[index]
-                    )
-                ) {
-                    matches = false
-                    break
-                }
-            }
-            if (matches) return length
+        currentForecast =
+            PredictionEngine.forecast(
+                history.toList()
+            )
+    }
+
+    private fun evaluateForecast(
+        forecast: PredictionEngine.Forecast,
+        actual: Double
+    ) {
+
+        val observed =
+            PredictionEngine.bucketIndex(actual)
+
+        evaluatedRounds++
+
+        if (forecast.bestBucket == observed) {
+            successfulRanges++
         }
-        return 0
+
+        saveEvaluationStats()
     }
+
+    private fun registerNewRound(
+        value: Double
+    ) {
+
+        // Evaluate the previous one-round estimate first.
+        // The actual result is not added to training history
+        // until this evaluation has been completed.
+
+        currentForecast?.let {
+
+            evaluateForecast(
+                it,
+                value
+            )
+        }
+
+        history.add(value)
+
+        totalNewRounds++
+
+        persistResults(
+            listOf(value),
+            "OCR"
+        )
+
+        // Calculate exactly one new future round.
+        refreshForecast()
+    }
+
+    // --------------------------------------------------
+    // HISTORY COMPARISON
+    // --------------------------------------------------
 
     private fun sameValue(
-        a: Double,
-        b: Double
+        first: Double,
+        second: Double
     ): Boolean {
 
-        return abs(a - b) < 0.015
+        return abs(first - second) <
+            OVERLAP_TOLERANCE
     }
 
     private fun sameHistory(
@@ -1353,12 +1482,67 @@ class CaptureService : Service() {
         }
 
         return first.indices.all {
+
             sameValue(
                 first[it],
                 second[it]
             )
         }
     }
+
+    // Compare stored chronological history with the
+    // chronological order of the visible baseline.
+
+    private fun findStoredOverlap(
+        stored: List<Double>,
+        visibleChronological: List<Double>
+    ): Int {
+
+        val maxLength = min(
+            stored.size,
+            visibleChronological.size
+        )
+
+        if (maxLength == 0) return 0
+
+        val required = min(
+            3,
+            maxLength
+        )
+
+        for (length in maxLength downTo required) {
+
+            var matches = true
+
+            for (i in 0 until length) {
+
+                if (
+                    !sameValue(
+                        stored[stored.size - length + i],
+                        visibleChronological[i]
+                    )
+                ) {
+
+                    matches = false
+
+                    break
+                }
+            }
+
+            if (matches) {
+                return length
+            }
+        }
+
+        return 0
+    }
+
+    private data class OverlapMatch(
+        val visibleIndex: Int,
+        val length: Int
+    )
+
+    // New website results appear at the head of its list.
 
     private fun findHeadOverlap(
         previous: List<Double>,
@@ -1376,14 +1560,11 @@ class CaptureService : Service() {
 
             return OverlapMatch(
                 0,
-                minOf(
-                    previous.size,
-                    current.size
-                )
+                previous.size
             )
         }
 
-        val maxNew = minOf(
+        val maxNew = min(
             MAX_NEW_PER_SCAN,
             current.size - 1
         )
@@ -1392,32 +1573,36 @@ class CaptureService : Service() {
 
         for (newCount in 0..maxNew) {
 
-            val available = current.size - newCount
+            val available =
+                current.size - newCount
 
-            val limit = minOf(
+            val limit = min(
                 previous.size,
                 available
             )
 
+            val required = min(
+                3,
+                limit
+            )
+
+            if (required <= 0) continue
+
             var length = 0
 
             while (
+
                 length < limit &&
+
                 sameValue(
                     previous[length],
                     current[newCount + length]
                 )
+
             ) {
+
                 length++
             }
-
-            val required = minOf(
-                3,
-                minOf(
-                    previous.size,
-                    available
-                )
-            )
 
             if (length >= required) {
 
@@ -1426,17 +1611,21 @@ class CaptureService : Service() {
                     length
                 )
 
-                val oldBest = best
+                val old = best
 
                 if (
-                    oldBest == null ||
-                    candidate.length > oldBest.length ||
+
+                    old == null ||
+
+                    candidate.length > old.length ||
+
                     (
-                        candidate.length == oldBest.length &&
-                            candidate.visibleIndex <
-                            oldBest.visibleIndex
-                        )
+                        candidate.length == old.length &&
+                        candidate.visibleIndex < old.visibleIndex
+                    )
+
                 ) {
+
                     best = candidate
                 }
             }
@@ -1445,244 +1634,260 @@ class CaptureService : Service() {
         return best
     }
 
-    // ------------------------------------------
-    // FORECAST AND EVALUATION
-    // ------------------------------------------
+    // --------------------------------------------------
+    // OBSERVE NEW OCR RESULTS
+    // --------------------------------------------------
 
-    private fun evaluateForecast(
-        forecast: PredictionEngine.Forecast,
-        actual: Double
+    private fun observe(
+        visible: List<Double>
     ) {
-        if (!actual.isFinite() || actual !in 0.0..10000.0) return
-
-        evaluatedRounds++
-        if (forecast.bucketIndex == PredictionEngine.bucketIndex(actual)) {
-            successfulRanges++
-        }
-        saveEvaluationStats()
-    }
-
-    /**
-     * One actual result closes the previous one-step forecast, is appended
-     * permanently, and immediately produces a fresh forecast for the next
-     * not-yet-started round.
-     */
-    private fun registerNewRounds(
-        values: List<Double>,
-        source: String = "OCR"
-    ) {
-        val accepted = values.filter {
-            it.isFinite() && it in 0.0..10000.0
-        }
-        if (accepted.isEmpty()) return
-
-        // Keep chronological order for both learning and Room sequence numbers.
-        accepted.forEach { value ->
-            pendingForecast?.let { evaluateForecast(it, value) }
-            history.add(value)
-            totalNewRounds++
-            updateForecast()
-        }
-
-        // Save the whole OCR batch in one ordered database operation.
-        persistResults(accepted, source)
-    }
-
-    // ------------------------------------------
-    // OBSERVE NEW RESULTS
-    // ------------------------------------------
-
-    private fun observe(visibleInput: List<Double>) {
-        val visible = visibleInput.filter {
-            it.isFinite() && it in 0.0..10000.0
-        }
 
         if (visible.isEmpty()) {
+
             statusMessage =
-                "ستون تاریخچه پیدا نشد؛ ستون ضرایب را واضح و بدون پوشش نگه دارید."
+                "ستون انفجار پیدا نشد؛ صفحه تاریخچه را واضح نگه دارید."
+
             render()
+
             return
         }
 
-        // First OCR scan after launch: reconcile the visible rows with the
-        // persistent Room history instead of replacing the in-memory training history.
+        // First OCR snapshot of this session.
+
         if (previousVisible.isEmpty()) {
-            previousVisible = visible.toList()
-            val chronological = visible.asReversed()
+
+            val chronological =
+                visible.asReversed()
 
             if (history.isEmpty()) {
+
+                // First-ever database initialization.
+                // Existing visible results are saved as baseline,
+                // not counted as newly observed rounds.
+
                 history.addAll(chronological)
-                persistResults(chronological, "OCR_BASELINE")
-                updateForecast()
+
+                persistResults(
+                    chronological,
+                    "OCR_BASELINE"
+                )
+
                 statusMessage =
-                    "${chronological.size} ضریب اولیه ثبت شد؛ تحلیل از تاریخچه آغاز شد."
+                    "${chronological.size} ضریب اولیه ثبت شد."
+
             } else {
-                val overlap = suffixPrefixOverlap(history, chronological)
+
+                // Compare current website history with
+                // the last saved database results.
+
+                val overlap = findStoredOverlap(
+                    history,
+                    chronological
+                )
 
                 if (overlap > 0) {
-                    val missed = chronological.drop(overlap)
-                    registerNewRounds(missed)
 
-                    statusMessage = if (missed.isNotEmpty()) {
-                        "${missed.size} نتیجه‌ای که هنگام توقف برنامه ثبت شده بود بازیابی شد."
-                    } else {
-                        "تاریخچه دائمی بازیابی و با صفحه تطبیق داده شد."
+                    val unseen = chronological.drop(
+                        overlap
+                    )
+
+                    unseen.forEach {
+                        registerNewRound(it)
                     }
-                } else {
-                    // A non-overlapping visible sequence is treated as a new
-                    // table/game baseline. The previous history is preserved.
-                    pendingForecast = null
-                    savePendingForecast(null)
 
-                    history.addAll(chronological)
-                    persistResults(chronological, "OCR_BASELINE")
-                    updateForecast()
+                    statusMessage = if (unseen.isNotEmpty()) {
+
+                        "${unseen.size} نتیجه جدید از زمان آخرین اجرا بازیابی شد."
+
+                    } else {
+
+                        "تاریخچه قبلی با موفقیت بازیابی شد."
+                    }
+
+                } else {
+
+                    // No reliable overlap: do not insert a possibly
+                    // duplicated or unrelated baseline.
 
                     statusMessage =
-                        "${chronological.size} ضریب از یک تاریخچه جدید به مجموعه دائمی اضافه شد."
+                        "تاریخچه قبلی بارگذاری شد؛ مبنای جدید OCR تنظیم شد."
                 }
             }
 
+            previousVisible = visible.toList()
+
+            refreshForecast()
+
             render()
+
             return
         }
 
-        if (sameHistory(visible, previousVisible)) {
-            statusMessage = "اسکن انجام شد؛ نتیجه جدیدی ثبت نشد."
+        if (
+            sameHistory(
+                visible,
+                previousVisible
+            )
+        ) {
+
+            statusMessage =
+                "اسکن انجام شد؛ نتیجه جدیدی ثبت نشد."
+
             render()
+
             return
         }
 
-        val overlap = findHeadOverlap(previousVisible, visible)
+        val overlap = findHeadOverlap(
+            previousVisible,
+            visible
+        )
 
-        if (overlap == null || overlap.visibleIndex > MAX_NEW_PER_SCAN) {
+        if (
+            overlap == null ||
+            overlap.visibleIndex > MAX_NEW_PER_SCAN
+        ) {
+
             noOverlapCount++
 
             if (noOverlapCount >= 3) {
+
                 previousVisible = visible.toList()
+
                 noOverlapCount = 0
 
-                val chronological = visible.asReversed()
-                val storedOverlap = suffixPrefixOverlap(history, chronological)
-
-                if (storedOverlap > 0) {
-                    val missed = chronological.drop(storedOverlap)
-                    registerNewRounds(missed)
-                    statusMessage =
-                        "${missed.size} نتیجه پس از تطبیق مجدد ثبت شد."
-                } else {
-                    pendingForecast = null
-                    savePendingForecast(null)
-                    history.addAll(chronological)
-                    // This is a mid-session append, not the session's initial baseline.
-                    persistResults(chronological, "OCR")
-                    updateForecast()
-                    statusMessage =
-                        "ردیف‌های صفحه تغییر کرده بود؛ مبنای تازه ثبت شد و تاریخچه قبلی حفظ شد."
-                }
-            } else {
                 statusMessage =
-                    "در حال تطبیق ردیف‌های مشترک تاریخچه..."
+                    "مبنای تاریخچه تازه شد؛ داده جدید ثبت نشد."
+
+            } else {
+
+                statusMessage =
+                    "در انتظار تطبیق ردیف‌های مشترک..."
             }
 
             render()
+
             return
         }
 
         noOverlapCount = 0
+
         val newCount = overlap.visibleIndex
 
         if (newCount > 0) {
-            // The website shows newest -> oldest; register results oldest -> newest.
-            val newValues = visible.take(newCount).asReversed()
-            registerNewRounds(newValues)
+
+            val newValues = visible
+                .take(newCount)
+                .asReversed()
+
+            newValues.forEach {
+
+                registerNewRound(it)
+            }
         }
 
         previousVisible = visible.toList()
 
         statusMessage = if (newCount > 0) {
-            "$newCount نتیجه جدید ثبت شد؛ پیش‌بینی دور بعد به‌روزرسانی شد."
+
+            "$newCount نتیجه جدید ثبت شد."
+
         } else {
-            "تاریخچه تطبیق داده شد؛ نتیجه جدیدی ثبت نشد."
-        }
 
-        render()
-    }
-            registerNewRounds(newValues)
-        }
-
-        previousVisible = visible.toList()
-
-        statusMessage = if (newCount > 0) {
-            "$newCount نتیجه جدید ثبت شد؛ پیش‌بینی دور بعد به‌روزرسانی شد."
-        } else {
-            "تاریخچه تطبیق داده شد؛ نتیجه جدیدی ثبت نشد."
+            "تاریخچه به‌روزرسانی شد؛ نتیجه جدیدی ثبت نشد."
         }
 
         render()
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // DISPLAY
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun render() {
+
+        val count = history.size
+
         val accuracy = if (evaluatedRounds > 0) {
-            successfulRanges * 100.0 / evaluatedRounds
+
+            successfulRanges * 100 / evaluatedRounds
+
         } else {
-            0.0
+
+            0
         }
 
         val counterText =
-            "تاریخچه دائمی: ${history.size} | " +
-            "دور جدید این اجرا: $totalNewRounds\n" +
+
+            "نمونه تاریخی: $count | " +
+            "دور جدید: $totalNewRounds\n" +
+
             "ارزیابی: $evaluatedRounds | " +
-            "تطبیق تاریخی: ${String.format(Locale.US, "%.1f", accuracy)}٪\n" +
-            statusMessage
+            "تطبیق بازه: $accuracy٪"
 
-        val forecastText = pendingForecast?.let { forecast ->
-            val probabilities = PredictionEngine.rangeLabels
-                .mapIndexed { index, label ->
-                    "$label: ${String.format(Locale.US, "%.1f", forecast.probabilities[index])}٪"
-                }
-                .joinToString("\n")
+        val forecast = currentForecast
 
-            val weights = PredictionEngine.modelNames
-                .mapIndexed { index, name ->
-                    "$name ${String.format(Locale.US, "%.1f", forecast.modelWeights[index])}٪"
-                }
-                .joinToString(" • ")
+        val forecastText = if (forecast == null) {
 
-            "پیش‌بینی فقط برای دور بعدی:\n" +
-                "${forecast.range} — " +
-                "${String.format(Locale.US, "%.1f", forecast.probabilityPercent)}٪\n\n" +
-                "احتمال پنج بازه:\n$probabilities\n\n" +
-                "وزن یادگیری پنج مدل:\n$weights\n" +
-                "مبنای تحلیل: ${forecast.sampleCount} ضریب ذخیره‌شده"
-        } ?: if (history.size < 10) {
-            "برای شروع تحلیل تطبیقی، حداقل ۱۰ ضریب معتبر لازم است.\n" +
-                "نمونه فعلی: ${history.size}"
+            "هنوز داده کافی برای تحلیل وجود ندارد.\n" +
+            "حداقل ${PredictionEngine.MIN_HISTORY} ضریب معتبر لازم است."
+
         } else {
-            "در حال محاسبه پیش‌بینی دور بعد..."
+
+            val distribution =
+                PredictionEngine.rangeNames
+                    .mapIndexed { index, name ->
+
+                        val mark = if (
+                            index == forecast.bestBucket
+                        ) "⭐" else "•"
+
+                        "$mark $name: ${forecast.probabilities[index]}٪"
+                    }
+                    .joinToString("\n")
+
+            val weights =
+                PredictionEngine.modelNames
+                    .mapIndexed { index, name ->
+
+                        "$name: ${forecast.modelWeights[index]}٪"
+                    }
+                    .joinToString(" | ")
+
+            "برآورد آماری فقط برای دور بعد:\n" +
+            "${forecast.range} " +
+            "(${forecast.probabilityPercent}٪)\n\n" +
+
+            distribution +
+
+            "\n\nوزن موتورهای تحلیل:\n" +
+            weights
         }
 
         ui.post {
-            statusText?.text = counterText
-            statsText?.text = forecastText
+
+            statusText?.text =
+                "$counterText\n$statusMessage"
+
+            statsText?.text =
+                forecastText
         }
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // NOTIFICATION
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun createChannel() {
 
         if (Build.VERSION.SDK_INT < 26) return
 
         val channel = NotificationChannel(
+
             CHANNEL,
+
             "خواندن صفحه",
+
             NotificationManager.IMPORTANCE_LOW
         )
 
@@ -1691,9 +1896,9 @@ class CaptureService : Service() {
         ).createNotificationChannel(channel)
     }
 
-    // ------------------------------------------
+    // --------------------------------------------------
     // CLEANUP
-    // ------------------------------------------
+    // --------------------------------------------------
 
     private fun stopCaptureResources() {
 
@@ -1733,11 +1938,13 @@ class CaptureService : Service() {
         worker?.quitSafely()
 
         worker = null
+
         handler = null
 
         try {
 
             overlay?.let {
+
                 windowManager?.removeView(it)
             }
 
@@ -1745,24 +1952,48 @@ class CaptureService : Service() {
         }
 
         overlay = null
+
         overlayParams = null
 
+        windowManager = null
+
         statusText = null
+
         statsText = null
+
         collapseButton = null
+
         details = null
 
         processing.set(false)
     }
 
+    // --------------------------------------------------
+    // DESTROY
+    // --------------------------------------------------
+
     override fun onDestroy() {
 
         sessionGeneration++
 
-        stopCaptureResources()
+        // Finish the session only after pending database writes.
+        val sessionId = activeSessionId
 
-        // Finish the current Room session.
-        finishDatabaseSession()
+        val dao = gameDao
+
+        val pending = writeTail
+
+        if (sessionId > 0L && dao != null) {
+
+            serviceScope.launch {
+
+                pending?.join()
+
+                dao.finishSession(sessionId)
+            }
+        }
+
+        stopCaptureResources()
 
         recognizer.close()
 
