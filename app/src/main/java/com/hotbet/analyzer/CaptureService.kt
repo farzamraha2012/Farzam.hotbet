@@ -39,6 +39,7 @@ import java.util.regex.Pattern
 import java.util.concurrent.atomic.AtomicBoolean
 
 import kotlin.math.abs
+import kotlin.math.ln
 import kotlin.math.min
 
 class CaptureService : Service() {
@@ -134,14 +135,28 @@ class CaptureService : Service() {
 
     private var totalNewRounds = 0
 
-    private var currentForecast:
-        PredictionEngine.Forecast? = null
+    private var currentForecasts =
+        emptyList<PredictionEngine.Forecast>()
 
     // EVALUATION
 
     private var evaluatedRounds = 0
 
     private var successfulRanges = 0
+
+    private var successfulBaselineRanges = 0
+
+    // Probability quality metrics are tracked separately from
+    // the older 0.9.5 hit-rate counters.
+    private var probabilityScoredRounds = 0
+
+    private var cumulativeLogLoss = 0.0
+
+    private var cumulativeBrierScore = 0.0
+
+    private var cumulativeBaselineLogLoss = 0.0
+
+    private var cumulativeBaselineBrierScore = 0.0
 
     private var statusMessage =
         "در انتظار خواندن تاریخچه ضرایب..."
@@ -181,7 +196,7 @@ class CaptureService : Service() {
         val notification =
             Notification.Builder(this, CHANNEL)
                 .setContentTitle(
-                    "HOTBET • Phoenix Analyzer • نسخه ۰٫۹٫۵"
+                    "HOTBET • Phoenix Analyzer • نسخه ۰٫۹٫۶"
                 )
                 .setContentText(
                     "در حال تحلیل تاریخچه ضرایب"
@@ -1294,15 +1309,43 @@ class CaptureService : Service() {
             MODE_PRIVATE
         )
 
+        // Start a clean 0.9.6 evaluation series. The previous
+        // 0.9.5 counters remain stored under their original keys.
         evaluatedRounds = prefs.getInt(
-            "evaluated",
+            "evaluated_v096",
             0
         )
 
         successfulRanges = prefs.getInt(
-            "successful",
+            "successful_v096",
             0
         )
+
+        successfulBaselineRanges = prefs.getInt(
+            "successful_baseline_v096",
+            0
+        )
+
+        probabilityScoredRounds = prefs.getInt(
+            "probability_scored_v096",
+            0
+        )
+
+        cumulativeLogLoss =
+            prefs.getLong("log_loss_micros_v096", 0L) /
+                1_000_000.0
+
+        cumulativeBrierScore =
+            prefs.getLong("brier_micros_v096", 0L) /
+                1_000_000.0
+
+        cumulativeBaselineLogLoss =
+            prefs.getLong("baseline_log_loss_micros_v096", 0L) /
+                1_000_000.0
+
+        cumulativeBaselineBrierScore =
+            prefs.getLong("baseline_brier_micros_v096", 0L) /
+                1_000_000.0
     }
 
     private fun saveEvaluationStats() {
@@ -1313,12 +1356,36 @@ class CaptureService : Service() {
         )
             .edit()
             .putInt(
-                "evaluated",
+                "evaluated_v096",
                 evaluatedRounds
             )
             .putInt(
-                "successful",
+                "successful_v096",
                 successfulRanges
+            )
+            .putInt(
+                "successful_baseline_v096",
+                successfulBaselineRanges
+            )
+            .putInt(
+                "probability_scored_v096",
+                probabilityScoredRounds
+            )
+            .putLong(
+                "log_loss_micros_v096",
+                (cumulativeLogLoss * 1_000_000.0).toLong()
+            )
+            .putLong(
+                "brier_micros_v096",
+                (cumulativeBrierScore * 1_000_000.0).toLong()
+            )
+            .putLong(
+                "baseline_log_loss_micros_v096",
+                (cumulativeBaselineLogLoss * 1_000_000.0).toLong()
+            )
+            .putLong(
+                "baseline_brier_micros_v096",
+                (cumulativeBaselineBrierScore * 1_000_000.0).toLong()
             )
             .apply()
     }
@@ -1335,7 +1402,7 @@ class CaptureService : Service() {
 
         totalNewRounds = 0
 
-        currentForecast = null
+        currentForecasts = emptyList()
 
         noOverlapCount = 0
 
@@ -1357,8 +1424,8 @@ class CaptureService : Service() {
 
     private fun refreshForecast() {
 
-        currentForecast =
-            PredictionEngine.forecast(
+        currentForecasts =
+            PredictionEngine.forecastNextFive(
                 history.toList()
             )
     }
@@ -1379,23 +1446,83 @@ class CaptureService : Service() {
             successfulRanges++
         }
 
+        if (forecast.baselineBestBucket == observed) {
+            successfulBaselineRanges++
+        }
+
+        // Score the actual probability assigned to the observed range.
+        // Log loss and multiclass Brier score measure probability quality,
+        // not just whether the top-ranked range happened to match.
+        if (forecast.probabilities.size == PredictionEngine.BUCKET_COUNT) {
+            val probabilities = forecast.probabilities.map {
+                it / 100.0
+            }
+
+            val actualProbability =
+                probabilities[observed].coerceAtLeast(0.000001)
+
+            cumulativeLogLoss += -ln(actualProbability)
+
+            var brier = 0.0
+
+            probabilities.forEachIndexed { index, probability ->
+                val expected = if (index == observed) 1.0 else 0.0
+                val difference = probability - expected
+                brier += difference * difference
+            }
+
+            cumulativeBrierScore += brier
+
+            if (
+                forecast.baselineProbabilities.size ==
+                PredictionEngine.BUCKET_COUNT
+            ) {
+                val baselineProbabilities =
+                    forecast.baselineProbabilities.map {
+                        it / 100.0
+                    }
+
+                val baselineActualProbability =
+                    baselineProbabilities[observed]
+                        .coerceAtLeast(0.000001)
+
+                cumulativeBaselineLogLoss +=
+                    -ln(baselineActualProbability)
+
+                var baselineBrier = 0.0
+
+                baselineProbabilities.forEachIndexed { index, probability ->
+                    val expected = if (index == observed) 1.0 else 0.0
+                    val difference = probability - expected
+                    baselineBrier += difference * difference
+                }
+
+                cumulativeBaselineBrierScore += baselineBrier
+            }
+
+            probabilityScoredRounds++
+        }
+
         saveEvaluationStats()
     }
 
     // REGISTER ONE NEW ROUND
 
     private fun registerNewRound(
-        value: Double
+        value: Double,
+        evaluatePreviousForecast: Boolean = true
     ) {
 
-        // Evaluate before adding the actual result to history.
-
-        currentForecast?.let {
-
-            evaluateForecast(
-                it,
-                value
-            )
+        // A recovered batch may contain results that arrived before the
+        // current scan. Only score a forecast when it genuinely preceded
+        // the result being registered.
+        if (evaluatePreviousForecast) {
+            currentForecasts.firstOrNull()?.let { forecast ->
+                evaluateForecast(
+                    forecast,
+                    value
+                )
+            }
         }
 
         history.add(value)
@@ -1407,7 +1534,7 @@ class CaptureService : Service() {
             "OCR"
         )
 
-        // Produce exactly one new future-round forecast.
+        // Recalculate the five upcoming horizons after the new result.
 
         refreshForecast()
     }
@@ -1642,7 +1769,10 @@ class CaptureService : Service() {
                     )
 
                     unseen.forEach {
-                        registerNewRound(it)
+                        registerNewRound(
+                            it,
+                            evaluatePreviousForecast = false
+                        )
                     }
 
                     statusMessage = if (unseen.isNotEmpty()) {
@@ -1728,8 +1858,11 @@ class CaptureService : Service() {
                 .take(newCount)
                 .asReversed()
 
-            newValues.forEach {
-                registerNewRound(it)
+            newValues.forEachIndexed { index, value ->
+                registerNewRound(
+                    value,
+                    evaluatePreviousForecast = index == 0
+                )
             }
         }
 
@@ -1754,11 +1887,14 @@ class CaptureService : Service() {
         val count = history.size
 
         val accuracy = if (evaluatedRounds > 0) {
-
             successfulRanges * 100 / evaluatedRounds
-
         } else {
+            0
+        }
 
+        val baselineAccuracy = if (evaluatedRounds > 0) {
+            successfulBaselineRanges * 100 / evaluatedRounds
+        } else {
             0
         }
 
@@ -1774,50 +1910,108 @@ class CaptureService : Service() {
             "نمونه تاریخی: $count | " +
             "دور جدید: $totalNewRounds\n" +
 
-            "ارزیابی: $evaluatedRounds | " +
-            "تطبیق بازه: $accuracy٪\n" +
+            "ارزیابی ۰٫۹٫۶: $evaluatedRounds | " +
+            "ترکیبی: $accuracy٪ | پایه: $baselineAccuracy٪\n" +
 
             "آخرین ضرایب: $recent"
 
-        val forecast = currentForecast
+        val forecasts = currentForecasts
 
-        val forecastText = if (forecast == null) {
+        val forecastText = if (forecasts.isEmpty()) {
 
             "هنوز داده کافی برای تحلیل وجود ندارد.\n" +
             "حداقل ${PredictionEngine.MIN_HISTORY} ضریب معتبر لازم است."
 
         } else {
 
-            val distribution =
+            val first = forecasts.first()
+
+            val horizonRows = forecasts.joinToString("  |  ") { forecast ->
+                "دور ${forecast.round}: ${forecast.range} " +
+                    "${forecast.probabilityPercent}٪"
+            }
+
+            val firstDistribution =
                 PredictionEngine.rangeNames
                     .mapIndexed { index, name ->
+                        val marker = if (
+                            index == first.bestBucket
+                        ) "⭐" else ""
 
-                        val mark = if (
-                            index == forecast.bestBucket
-                        ) "⭐" else "•"
-
-                        "$mark $name: ${forecast.probabilities[index]}٪"
+                        "$marker$name ${first.probabilities[index]}٪"
                     }
-                    .joinToString("\n")
+                    .joinToString(" | ")
 
             val weights =
                 PredictionEngine.modelNames
                     .mapIndexed { index, name ->
-
-                        "$name: ${forecast.modelWeights[index]}٪"
+                        "$name ${first.modelWeights[index]}٪"
                     }
                     .joinToString(" | ")
 
-            "برآورد آماری فقط برای دور بعد:\n" +
+            val calibrationText = if (first.calibrationApplied) {
+                "کالیبراسیون فعال؛ آزمون: ${first.backtestCount} دور"
+            } else {
+                "کالیبراسیون پس از ۳۰ نمونه آزمون فعال می‌شود"
+            }
 
-            "${forecast.range} " +
-            "(${forecast.probabilityPercent}٪)\n\n" +
+            val backtestText =
+                "آزمون پیش‌رونده: ترکیبی " +
+                    "${first.backtestEnsembleHitRatePercent}٪ / " +
+                    "پایه ${first.backtestBaselineHitRatePercent}٪ | " +
+                    "LogLoss " +
+                    String.format(
+                        Locale.US,
+                        "%.2f",
+                        first.backtestEnsembleLogLoss
+                    ) +
+                    " / " +
+                    String.format(
+                        Locale.US,
+                        "%.2f",
+                        first.backtestBaselineLogLoss
+                    )
 
-            distribution +
+            val blendText =
+                "سهم مدل‌های زمانی: ${first.ensembleSharePercent}٪ | " +
+                    "پایه: ${100 - first.ensembleSharePercent}٪ | " +
+                    "فاصله بازه اول و دوم: ${first.probabilityGapPercent}٪"
 
-            "\n\nوزن موتورهای تحلیل:\n" +
+            val liveProbabilityText =
+                if (probabilityScoredRounds > 0) {
+                    val averageLogLoss =
+                        cumulativeLogLoss / probabilityScoredRounds
 
-            weights
+                    val baselineLogLoss =
+                        cumulativeBaselineLogLoss / probabilityScoredRounds
+
+                    val averageBrier =
+                        cumulativeBrierScore / probabilityScoredRounds
+
+                    val baselineBrier =
+                        cumulativeBaselineBrierScore / probabilityScoredRounds
+
+                    "\nارزیابی زنده ${probabilityScoredRounds} دور: " +
+                        "LogLoss " +
+                        String.format(Locale.US, "%.2f", averageLogLoss) +
+                        " / " +
+                        String.format(Locale.US, "%.2f", baselineLogLoss) +
+                        " | Brier " +
+                        String.format(Locale.US, "%.2f", averageBrier) +
+                        " / " +
+                        String.format(Locale.US, "%.2f", baselineBrier)
+                } else {
+                    ""
+                }
+
+            "پنج دور آینده:\n" +
+                horizonRows +
+                "\n\nتوزیع دور اول: " +
+                firstDistribution +
+                "\n\nوزن موتورها: " +
+                weights +
+                "\n\n$calibrationText\n$backtestText\n$blendText" +
+                liveProbabilityText
         }
 
         ui.post {
